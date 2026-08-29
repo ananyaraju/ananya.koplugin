@@ -1,10 +1,8 @@
--- main.lua - ananya
+-- helloworld.lua - ananya
+-- testing out whether my plugin can work on my jailbroken kindle
 
 -- get WidgetContainer class from KOReader
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
-
--- stats/library home page, in the same plugin folder
-local StatsPage = require("pages/stats")
 
 -- specialized WidgetContainer
 local AnanyaUI = WidgetContainer:extend{
@@ -20,9 +18,13 @@ end
 function AnanyaUI:addToMainMenu(menu_items)
     menu_items.ananyaUI = {
         text = "Ananya UI",
+        description = "Hello World to check init of AnanyaUI",
         -- what happens when menu item is selected
         callback = function()
-            StatsPage.show()
+            local UIManager = require("ui/uimanager")
+            local InfoMessage = require("ui/widget/infomessage")
+            UIManager:show(InfoMessage:new{ text = "Hello Ananya" })
+            print("Hello Ananya!")
         end,
     }
 end
