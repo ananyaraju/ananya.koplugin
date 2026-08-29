@@ -89,6 +89,21 @@ function AnanyaLibrary:init()
         self.key_events.Close = { { Device.input.group.Back } }
     end
 
+    -- Same approach as home.lua — see widgets/header.lua's
+    -- CLOSE_ZONE_RATIO comment for why this uses registerTouchZones
+    -- (hold-only) instead of an embedded Button.
+    self:registerTouchZones{
+        {
+            id = "ananya_library_close",
+            ges = "hold",
+            screen_zone = Header.getCloseZoneRatio(),
+            handler = function()
+                self:onClose()
+                return true
+            end,
+        },
+    }
+
     self.search_query = nil -- nil = no active filter
 
     local ok, err = pcall(function() self:buildUI() end)

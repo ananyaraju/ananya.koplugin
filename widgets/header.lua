@@ -19,7 +19,6 @@
 --     }
 
 local Blitbuffer = require("ffi/blitbuffer")
-local Button = require("ui/widget/button")
 local CenterContainer = require("ui/widget/container/centercontainer")
 local Device = require("device")
 local FrameContainer = require("ui/widget/container/framecontainer")
@@ -48,6 +47,47 @@ local FONT_SIZE = 16
 -- Total height including the bottom divider line. Pages should subtract
 -- this from their own available content height.
 Header.HEIGHT = BAR_H + Size.line.thin
+
+-- --------------------------------------------------------------------------
+-- Close "button" — actually just a visual glyph now, not an interactive
+-- widget. Read on for why.
+--
+-- WHY NOT A REAL BUTTON: KOReader's own Button widget unconditionally
+-- registers Tap AND Hold AND HoldRelease gesture zones over its bounding
+-- box the moment it's created — even if you only set hold_callback and
+-- leave callback nil, the tap zone still exists and "claims" every tap
+-- (and, in practice, short swipes) landing on it, just silently no-op'ing.
+-- That's what was eating the normal Kindle swipe-down gesture: a swipe
+-- starting in that corner was getting captured as a tap by the button's
+-- zone before it could be recognized as a swipe at all.
+--
+-- SimpleUI avoids this same trap for its own top bar (see its
+-- screens/sui_topbar.lua registerTouchZones) by using InputContainer's
+-- registerTouchZones API directly instead of embedding a Button: that API
+-- lets you claim ONE specific gesture type (here, "hold") over a named
+-- screen region, leaving every other gesture type in that same region —
+-- tap, swipe, whatever — completely unclaimed, exactly as if nothing was
+-- there. We do the same: this glyph is just a TextWidget with no gesture
+-- handling of its own, and each page (home.lua, library.lua) registers
+-- its OWN "hold" zone over CLOSE_ZONE_RATIO via self:registerTouchZones().
+-- --------------------------------------------------------------------------
+
+-- Generous top-right zone covering the glyph — a hold doesn't need to be
+-- pixel-precise, and being generous here costs nothing since only "hold"
+-- is claimed, not "tap" or "swipe".
+Header.CLOSE_ZONE_RATIO = { ratio_x = 0.80, ratio_y = 0, ratio_w = 0.20 }
+
+-- ratio_h depends on BAR_H, which is only known once Screen exists — build
+-- the full ratio table on demand rather than hardcoding ratio_h above.
+function Header.getCloseZoneRatio()
+    local screen_h = Screen:getHeight()
+    return {
+        ratio_x = Header.CLOSE_ZONE_RATIO.ratio_x,
+        ratio_y = Header.CLOSE_ZONE_RATIO.ratio_y,
+        ratio_w = Header.CLOSE_ZONE_RATIO.ratio_w,
+        ratio_h = BAR_H / screen_h,
+    }
+end
 
 -- --------------------------------------------------------------------------
 -- Small custom battery glyph (outline + fill level + nub), built from plain
@@ -162,14 +202,12 @@ function Header._buildInner(opts)
 
     if opts.on_close then
         table.insert(right_items, HorizontalSpan:new{ width = Screen:scaleBySize(14) })
-        table.insert(right_items, Button:new{
+        -- Plain glyph, no gesture handling — see the CLOSE_ZONE_RATIO
+        -- comment above. Actual closing is wired by the page via
+        -- self:registerTouchZones(...) using Header.getCloseZoneRatio().
+        table.insert(right_items, TextWidget:new{
             text = "\u{2715}", -- ✕
-            callback = opts.on_close,
-            bordersize = 0,
-            margin = 0,
-            padding = 0,
-            text_font_size = FONT_SIZE + 2,
-            text_font_bold = true,
+            face = Font:getFace("tfont", FONT_SIZE + 2), -- tfont = bold face
         })
     end
 
@@ -222,11 +260,9 @@ function Header._buildFallback(opts)
     end
     if opts.on_close then
         table.insert(right_items, HorizontalSpan:new{ width = Screen:scaleBySize(14) })
-        table.insert(right_items, Button:new{
+        table.insert(right_items, TextWidget:new{
             text = "\u{2715}",
-            callback = opts.on_close,
-            bordersize = 0, margin = 0, padding = 0,
-            text_font_size = FONT_SIZE + 2, text_font_bold = true,
+            face = Font:getFace("tfont", FONT_SIZE + 2),
         })
     end
     local right_group = HorizontalGroup:new(right_items)

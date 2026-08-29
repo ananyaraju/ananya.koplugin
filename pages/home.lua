@@ -12,6 +12,7 @@ local Geom = require("ui/geometry")
 local GestureRange = require("ui/gesturerange")
 local HorizontalGroup = require("ui/widget/horizontalgroup")
 local HorizontalSpan = require("ui/widget/horizontalspan")
+local ImageWidget = require("ui/widget/imagewidget")
 local InputContainer = require("ui/widget/container/inputcontainer")
 local ScrollableContainer
 do
@@ -72,6 +73,23 @@ function AnanyaHome:init()
         self.key_events.Close = { { Device.input.group.Back } }
     end
 
+    -- Close via a HOLD over the header's close-glyph area, not a tap —
+    -- see widgets/header.lua's CLOSE_ZONE_RATIO comment for why this
+    -- approach (InputContainer:registerTouchZones claiming only "hold")
+    -- is used instead of an embedded Button, which would also silently
+    -- claim tap/swipe over that same corner.
+    self:registerTouchZones{
+        {
+            id = "ananya_home_close",
+            ges = "hold",
+            screen_zone = Header.getCloseZoneRatio(),
+            handler = function()
+                self:onClose()
+                return true
+            end,
+        },
+    }
+
     local ok, err = pcall(function() self:buildUI() end)
     if not ok then
         logger.warn("Ananya: home buildUI failed ->", tostring(err))
@@ -127,7 +145,7 @@ end
 -- "Currently Reading" section
 -- ---------------------------------------------------------------------------
 
--- A tappable row: title + percent, opens the book directly.
+-- A tappable card: cover + title/author/progress, opens the book directly.
 local ReadingRow = InputContainer:extend{}
 
 function ReadingRow:init()
@@ -142,31 +160,130 @@ function ReadingRow:onTap()
     return true
 end
 
-function AnanyaHome:buildReadingRow(entry, row_w)
-    local face = Font:getFace("cfont", 16)
-    local title = TextWidget:new{
-        text = entry.name,
-        face = face,
-        max_width = math.floor(row_w * 0.7),
+-- Safe progress bar: outer FrameContainer (border + track color) wrapping
+-- ONE real child LineWidget for the fill. Never a childless FrameContainer
+-- (see header.lua's buildBatteryIcon comment for why that crashes).
+local function buildProgressBar(ratio, width, height)
+    ratio = math.min(1, math.max(0, ratio or 0))
+    local fill_w = math.floor(width * ratio)
+    local fill = LineWidget:new{
+        dimen = Geom:new{ w = fill_w, h = height },
+        background = Blitbuffer.COLOR_BLACK,
     }
-    local percent = TextWidget:new{
-        text = string.format("%d%%", math.floor(entry.percent * 100)),
-        face = face,
+    return FrameContainer:new{
+        width = width,
+        height = height,
+        bordersize = 0,
+        margin = 0,
+        padding = 0,
+        background = Blitbuffer.COLOR_LIGHT_GRAY,
+        fill,
     }
+end
+
+-- Opens the document briefly to read its title/authors and cover image.
+-- Wrapped in pcall throughout: a corrupt or unsupported file must degrade
+-- to "no cover, filename as title" rather than break the whole page.
+-- NOTE: this opens the actual document per book — fine for a short
+-- "currently reading" list, but would be slow for a long one.
+local function getCoverAndProps(path)
+    local ok, result = pcall(function()
+        local DocumentRegistry = require("document/documentregistry")
+        local doc = DocumentRegistry:openDocument(path)
+        if not doc then return nil end
+        local props = doc:getProps() or {}
+        local cover = nil
+        local ok_cover, cover_or_err = pcall(function() return doc:getCoverPageImage() end)
+        if ok_cover then cover = cover_or_err end
+        DocumentRegistry:closeDocument(path)
+        return { title = props.title, authors = props.authors, cover = cover }
+    end)
+    if ok then return result end
+    return nil
+end
+
+function AnanyaHome:buildReadingCard(entry, card_w)
+    local cover_w = Screen:scaleBySize(60)
+    local cover_h = Screen:scaleBySize(90)
+    local gap = Screen:scaleBySize(12)
+    local text_w = card_w - cover_w - gap
+
+    local meta = getCoverAndProps(entry.path) or {}
+
+    local cover_widget
+    if meta.cover then
+        cover_widget = ImageWidget:new{
+            image = meta.cover,
+            width = cover_w,
+            height = cover_h,
+            scale_factor = 0, -- best-fit within width/height, keep aspect ratio
+        }
+    else
+        -- Fallback placeholder — has a real child (CenterContainer), so it
+        -- can't hit the childless-FrameContainer crash.
+        cover_widget = FrameContainer:new{
+            width = cover_w,
+            height = cover_h,
+            bordersize = Size.border.window,
+            color = Blitbuffer.COLOR_LIGHT_GRAY,
+            background = Blitbuffer.COLOR_WHITE,
+            margin = 0,
+            padding = 0,
+            CenterContainer:new{
+                dimen = Geom:new{ w = cover_w, h = cover_h },
+                TextWidget:new{ text = "", face = Font:getFace("cfont", 10) },
+            },
+        }
+    end
+
+    local title_widget = TextWidget:new{
+        text = meta.title or entry.name,
+        face = Font:getFace("tfont", 16),
+        max_width = text_w,
+    }
+
+    local bar_h = Screen:scaleBySize(6)
+    local percent_label = TextWidget:new{
+        text = string.format("%d%% Read", math.floor(entry.percent * 100)),
+        face = Font:getFace("cfont", 12),
+        fgcolor = Blitbuffer.COLOR_DARK_GRAY,
+    }
+
+    -- Build the text column with table.insert (never a nil hole in the
+    -- middle of a widget-group's array, which would break its iteration).
+    local text_col = VerticalGroup:new{}
+    table.insert(text_col, title_widget)
+    table.insert(text_col, VerticalSpan:new{ width = Screen:scaleBySize(4) })
+    if meta.authors then
+        table.insert(text_col, TextWidget:new{
+            text = meta.authors,
+            face = Font:getFace("cfont", 13),
+            fgcolor = Blitbuffer.COLOR_DARK_GRAY,
+            max_width = text_w,
+        })
+        table.insert(text_col, VerticalSpan:new{ width = Screen:scaleBySize(8) })
+    else
+        table.insert(text_col, VerticalSpan:new{ width = Screen:scaleBySize(4) })
+    end
+    table.insert(text_col, buildProgressBar(entry.percent, text_w, bar_h))
+    table.insert(text_col, VerticalSpan:new{ width = Screen:scaleBySize(4) })
+    table.insert(text_col, percent_label)
+
     local row = HorizontalGroup:new{
-        title,
-        HorizontalSpan:new{ width = row_w - title:getSize().w - percent:getSize().w },
-        percent,
+        cover_widget,
+        HorizontalSpan:new{ width = gap },
+        text_col,
     }
+
     local framed = FrameContainer:new{
-        width = row_w,
-        bordersize = 0, margin = 0,
+        width = card_w,
+        bordersize = 0,
+        margin = 0,
         padding_top = Screen:scaleBySize(8),
         padding_bottom = Screen:scaleBySize(8),
-        padding_left = Screen:scaleBySize(4),
-        padding_right = Screen:scaleBySize(4),
         row,
     }
+
     return ReadingRow:new{
         callback = function()
             local ReaderUI = require("apps/reader/readerui")
@@ -197,7 +314,7 @@ function AnanyaHome:buildCurrentlyReadingSection(content_w)
     else
         local rows = VerticalGroup:new{}
         for _, entry in ipairs(reading) do
-            table.insert(rows, self:buildReadingRow(entry, content_w))
+            table.insert(rows, self:buildReadingCard(entry, content_w))
         end
         body = rows
     end
@@ -249,7 +366,12 @@ end
 function AnanyaHome:buildUI()
     local screen_w, screen_h = Screen:getWidth(), Screen:getHeight()
     local side_margin = Screen:scaleBySize(16)
-    local content_w = screen_w - 2 * side_margin
+    -- Small safety margin: content is built to exactly content_w, but a
+    -- 1px rounding difference anywhere would make ScrollableContainer
+    -- think the content overflows and draw a horizontal scrollbar along
+    -- the bottom (this was the "trailing bar" bug) — a couple of spare
+    -- pixels of headroom makes that structurally very unlikely.
+    local content_w = screen_w - 2 * side_margin - Screen:scaleBySize(4)
 
     local header = Header.build{ on_close = function() self:onClose() end }
     local bottom_nav = BottomNav.build("home", function(target_id)
