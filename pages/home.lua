@@ -14,6 +14,7 @@ local HorizontalGroup = require("ui/widget/horizontalgroup")
 local HorizontalSpan = require("ui/widget/horizontalspan")
 local ImageWidget = require("ui/widget/imagewidget")
 local InputContainer = require("ui/widget/container/inputcontainer")
+local LineWidget = require("ui/widget/linewidget")
 local ScrollableContainer
 do
     -- Not every KOReader version ships the same scroll-container name; try
@@ -72,23 +73,6 @@ function AnanyaHome:init()
     if Device:hasKeys() then
         self.key_events.Close = { { Device.input.group.Back } }
     end
-
-    -- Close via a HOLD over the header's close-glyph area, not a tap —
-    -- see widgets/header.lua's CLOSE_ZONE_RATIO comment for why this
-    -- approach (InputContainer:registerTouchZones claiming only "hold")
-    -- is used instead of an embedded Button, which would also silently
-    -- claim tap/swipe over that same corner.
-    self:registerTouchZones{
-        {
-            id = "ananya_home_close",
-            ges = "hold",
-            screen_zone = Header.getCloseZoneRatio(),
-            handler = function()
-                self:onClose()
-                return true
-            end,
-        },
-    }
 
     local ok, err = pcall(function() self:buildUI() end)
     if not ok then
@@ -191,6 +175,17 @@ local function getCoverAndProps(path)
         local DocumentRegistry = require("document/documentregistry")
         local doc = DocumentRegistry:openDocument(path)
         if not doc then return nil end
+        -- CreDocument (epub/mobi/fb2/txt/html) doesn't populate metadata
+        -- until the document is explicitly loaded. getCoverPageImage()
+        -- does this loading internally for itself, but getProps() does
+        -- NOT — confirmed by reading credocument.lua directly — so
+        -- without this, title/authors come back empty and we always
+        -- fell back to the filename. Only CreDocument defines
+        -- loadDocument, hence the existence check (PDF/CBZ/etc don't
+        -- need or have this method).
+        if doc.loadDocument then
+            pcall(function() doc:loadDocument() end)
+        end
         local props = doc:getProps() or {}
         local cover = nil
         local ok_cover, cover_or_err = pcall(function() return doc:getCoverPageImage() end)
@@ -366,12 +361,22 @@ end
 function AnanyaHome:buildUI()
     local screen_w, screen_h = Screen:getWidth(), Screen:getHeight()
     local side_margin = Screen:scaleBySize(16)
-    -- Small safety margin: content is built to exactly content_w, but a
-    -- 1px rounding difference anywhere would make ScrollableContainer
-    -- think the content overflows and draw a horizontal scrollbar along
-    -- the bottom (this was the "trailing bar" bug) — a couple of spare
-    -- pixels of headroom makes that structurally very unlikely.
-    local content_w = screen_w - 2 * side_margin - Screen:scaleBySize(4)
+    local content_w = screen_w - 2 * side_margin
+
+    -- ScrollableContainer always shows a vertical scrollbar here (our
+    -- content is normally taller than one screen). When it does, it
+    -- RE-CHECKS whether a horizontal scrollbar is ALSO needed by
+    -- comparing content width against (dimen.w - 3*scrollbar_width) — not
+    -- dimen.w itself. If our content fills the full content_w, that check
+    -- always false-positives, which was BOTH the phantom bar at the
+    -- bottom (issue: extra status bar) AND the content getting visually
+    -- cropped/shifted (issue: progress bar pushed to the right — that was
+    -- KOReader thinking horizontal scroll was needed and showing a
+    -- shifted viewport). Building the actual content narrower than
+    -- content_w by this same margin fixes both at the root, rather than
+    -- being a cosmetic patch.
+    local scrollbar_reserve = Screen:scaleBySize(20) -- 3x default scroll_bar_width(6) + a hair of margin
+    local inner_w = content_w - scrollbar_reserve
 
     local header = Header.build{ on_close = function() self:onClose() end }
     local bottom_nav = BottomNav.build("home", function(target_id)
@@ -381,9 +386,9 @@ function AnanyaHome:buildUI()
     local content_h = screen_h - Header.HEIGHT - BottomNav.HEIGHT
 
     local body = VerticalGroup:new{
-        self:buildCurrentlyReadingSection(content_w),
+        self:buildCurrentlyReadingSection(inner_w),
         VerticalSpan:new{ width = Screen:scaleBySize(24) },
-        self:buildStatsSection(content_w),
+        self:buildStatsSection(inner_w),
     }
 
     -- Wrap in a scroll container if available, so a long "currently

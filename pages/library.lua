@@ -89,21 +89,6 @@ function AnanyaLibrary:init()
         self.key_events.Close = { { Device.input.group.Back } }
     end
 
-    -- Same approach as home.lua — see widgets/header.lua's
-    -- CLOSE_ZONE_RATIO comment for why this uses registerTouchZones
-    -- (hold-only) instead of an embedded Button.
-    self:registerTouchZones{
-        {
-            id = "ananya_library_close",
-            ges = "hold",
-            screen_zone = Header.getCloseZoneRatio(),
-            handler = function()
-                self:onClose()
-                return true
-            end,
-        },
-    }
-
     self.search_query = nil -- nil = no active filter
 
     local ok, err = pcall(function() self:buildUI() end)
@@ -262,6 +247,11 @@ function AnanyaLibrary:buildUI()
     local screen_w, screen_h = Screen:getWidth(), Screen:getHeight()
     local side_margin = Screen:scaleBySize(16)
     local content_w = screen_w - 2 * side_margin
+    -- See home.lua's buildUI for why this margin exists: ScrollableContainer
+    -- false-positives a horizontal scrollbar whenever a vertical one is
+    -- shown and the content fills the full available width.
+    local scrollbar_reserve = Screen:scaleBySize(20)
+    local inner_w = content_w - scrollbar_reserve
 
     local header = Header.build{ on_close = function() self:onClose() end }
     local bottom_nav = BottomNav.build("library", function(target_id)
@@ -330,7 +320,7 @@ function AnanyaLibrary:buildUI()
         })
     else
         for _, entry in ipairs(visible_files) do
-            table.insert(rows, self:buildBookRow(entry, content_w))
+            table.insert(rows, self:buildBookRow(entry, inner_w))
         end
     end
 

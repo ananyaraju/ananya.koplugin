@@ -19,6 +19,7 @@
 --     }
 
 local Blitbuffer = require("ffi/blitbuffer")
+local Button = require("ui/widget/button")
 local CenterContainer = require("ui/widget/container/centercontainer")
 local Device = require("device")
 local FrameContainer = require("ui/widget/container/framecontainer")
@@ -49,45 +50,20 @@ local FONT_SIZE = 16
 Header.HEIGHT = BAR_H + Size.line.thin
 
 -- --------------------------------------------------------------------------
--- Close "button" — actually just a visual glyph now, not an interactive
--- widget. Read on for why.
+-- Close button.
 --
--- WHY NOT A REAL BUTTON: KOReader's own Button widget unconditionally
--- registers Tap AND Hold AND HoldRelease gesture zones over its bounding
--- box the moment it's created — even if you only set hold_callback and
--- leave callback nil, the tap zone still exists and "claims" every tap
--- (and, in practice, short swipes) landing on it, just silently no-op'ing.
--- That's what was eating the normal Kindle swipe-down gesture: a swipe
--- starting in that corner was getting captured as a tap by the button's
--- zone before it could be recognized as a swipe at all.
---
--- SimpleUI avoids this same trap for its own top bar (see its
--- screens/sui_topbar.lua registerTouchZones) by using InputContainer's
--- registerTouchZones API directly instead of embedding a Button: that API
--- lets you claim ONE specific gesture type (here, "hold") over a named
--- screen region, leaving every other gesture type in that same region —
--- tap, swipe, whatever — completely unclaimed, exactly as if nothing was
--- there. We do the same: this glyph is just a TextWidget with no gesture
--- handling of its own, and each page (home.lua, library.lua) registers
--- its OWN "hold" zone over CLOSE_ZONE_RATIO via self:registerTouchZones().
+-- NOTE: an earlier version tried to avoid interfering with the Kindle's
+-- swipe-down gesture by using InputContainer:registerTouchZones to claim
+-- only "hold" (not "tap") over this corner, the same technique SimpleUI
+-- uses for its own top bar. That stopped this button from stealing your
+-- swipe, but it did NOT restore the actual thing you wanted — KOReader's
+-- native Tools/Search menu on swipe-down. That menu is implemented inside
+-- the File Manager and Reader screens themselves; Ananya is a separate
+-- custom screen that never had that behavior, with or without this
+-- button. Reproducing it would mean building Ananya on top of FileManager
+-- itself rather than as its own screen — a much bigger change than a
+-- button tweak. So this reverts to a plain, reliable tap-to-close button.
 -- --------------------------------------------------------------------------
-
--- Generous top-right zone covering the glyph — a hold doesn't need to be
--- pixel-precise, and being generous here costs nothing since only "hold"
--- is claimed, not "tap" or "swipe".
-Header.CLOSE_ZONE_RATIO = { ratio_x = 0.80, ratio_y = 0, ratio_w = 0.20 }
-
--- ratio_h depends on BAR_H, which is only known once Screen exists — build
--- the full ratio table on demand rather than hardcoding ratio_h above.
-function Header.getCloseZoneRatio()
-    local screen_h = Screen:getHeight()
-    return {
-        ratio_x = Header.CLOSE_ZONE_RATIO.ratio_x,
-        ratio_y = Header.CLOSE_ZONE_RATIO.ratio_y,
-        ratio_w = Header.CLOSE_ZONE_RATIO.ratio_w,
-        ratio_h = BAR_H / screen_h,
-    }
-end
 
 -- --------------------------------------------------------------------------
 -- Small custom battery glyph (outline + fill level + nub), built from plain
@@ -202,12 +178,14 @@ function Header._buildInner(opts)
 
     if opts.on_close then
         table.insert(right_items, HorizontalSpan:new{ width = Screen:scaleBySize(14) })
-        -- Plain glyph, no gesture handling — see the CLOSE_ZONE_RATIO
-        -- comment above. Actual closing is wired by the page via
-        -- self:registerTouchZones(...) using Header.getCloseZoneRatio().
-        table.insert(right_items, TextWidget:new{
+        table.insert(right_items, Button:new{
             text = "\u{2715}", -- ✕
-            face = Font:getFace("tfont", FONT_SIZE + 2), -- tfont = bold face
+            callback = opts.on_close,
+            bordersize = 0,
+            margin = 0,
+            padding = 0,
+            text_font_size = FONT_SIZE + 2,
+            text_font_bold = true,
         })
     end
 
@@ -260,9 +238,11 @@ function Header._buildFallback(opts)
     end
     if opts.on_close then
         table.insert(right_items, HorizontalSpan:new{ width = Screen:scaleBySize(14) })
-        table.insert(right_items, TextWidget:new{
+        table.insert(right_items, Button:new{
             text = "\u{2715}",
-            face = Font:getFace("tfont", FONT_SIZE + 2),
+            callback = opts.on_close,
+            bordersize = 0, margin = 0, padding = 0,
+            text_font_size = FONT_SIZE + 2, text_font_bold = true,
         })
     end
     local right_group = HorizontalGroup:new(right_items)
