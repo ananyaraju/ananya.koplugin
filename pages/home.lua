@@ -15,22 +15,33 @@ local HorizontalSpan = require("ui/widget/horizontalspan")
 local ImageWidget = require("ui/widget/imagewidget")
 local InputContainer = require("ui/widget/container/inputcontainer")
 local LineWidget = require("ui/widget/linewidget")
-local ScrollableContainer
-do
-    -- Not every KOReader version ships the same scroll-container name; try
-    -- the common one and fall back to a plain (non-scrolling) container so
-    -- a missing module can't crash the whole page.
-    local ok, mod = pcall(require, "ui/widget/container/scrollablecontainer")
-    ScrollableContainer = ok and mod or nil
-end
 local Size = require("ui/size")
 local TextBoxWidget = require("ui/widget/textboxwidget")
 local TextWidget = require("ui/widget/textwidget")
 local UIManager = require("ui/uimanager")
 local VerticalGroup = require("ui/widget/verticalgroup")
 local VerticalSpan = require("ui/widget/verticalspan")
+local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local logger = require("logger")
+local util = require("util")
 local _ = require("gettext")
+
+-- Opens a book, catching ANY error (bad file, corrupt document, whatever)
+-- so it shows a message instead of taking the whole app down. Used by
+-- every "tap a book to open it" callback in this file.
+local function safeOpenBook(path)
+    local ok, err = pcall(function()
+        local ReaderUI = require("apps/reader/readerui")
+        ReaderUI:showReader(path)
+    end)
+    if not ok then
+        logger.warn("Ananya: failed to open book ->", tostring(path), tostring(err))
+        local InfoMessage = require("ui/widget/infomessage")
+        UIManager:show(InfoMessage:new{
+            text = _("Couldn't open that book. It may be missing or corrupted."),
+        })
+    end
+end
 
 -- Defensive requires: any of these being missing/misplaced degrades
 -- gracefully instead of taking the whole plugin down at load time.
@@ -92,6 +103,19 @@ end
 function AnanyaHome:onClose()
     UIManager:close(self)
     return true
+end
+
+-- ReaderUI:showReader() documents itself as "the *only* safe way" to open
+-- a book — it closes whatever screen was active FOR you, by broadcasting
+-- a "ShowingReader" event that any active widget can catch (this is
+-- exactly how KOReader's own Menu and FileManager widgets handle it).
+-- We were previously calling UIManager:close(self) manually right before
+-- showReader() from inside an active tap callback, which raced against
+-- this same built-in mechanism and left a dangling, partially-torn-down
+-- widget in the stack — that was the actual cause of the crash on the
+-- next touch after returning from a book.
+function AnanyaHome:onShowingReader()
+    self:onClose()
 end
 
 function AnanyaHome:switchTo(target_id)
@@ -194,7 +218,16 @@ local function getCoverAndProps(path)
         local ok_cover, cover_or_err = pcall(function() return doc:getCoverPageImage() end)
         if ok_cover then cover = cover_or_err end
         DocumentRegistry:closeDocument(path)
-        return { title = props.title, authors = props.authors, cover = cover }
+        -- Epub/etc descriptions are frequently raw HTML (tags + entities
+        -- like &#8212;) — util.htmlToPlainTextIfHtml is KOReader's own
+        -- built-in for exactly this (it's what SimpleUI uses too, for the
+        -- same <dc:description> field).
+        local description = props.description
+        if description then
+            local ok_html, plain = pcall(util.htmlToPlainTextIfHtml, description)
+            description = ok_html and plain or description
+        end
+        return { title = props.title, authors = props.authors, description = description, cover = cover }
     end)
     if ok then return result end
     return nil
@@ -220,9 +253,9 @@ function AnanyaHome:buildBookCard(entry, card_w, opts)
     opts = opts or {}
     local is_hero = opts.size == "hero"
 
-    local cover_w = is_hero and Screen:scaleBySize(110) or Screen:scaleBySize(50)
-    local cover_h = is_hero and Screen:scaleBySize(165) or Screen:scaleBySize(75)
-    local gap = Screen:scaleBySize(is_hero and 16 or 10)
+    local cover_w = is_hero and Screen:scaleBySize(160) or Screen:scaleBySize(50)
+    local cover_h = is_hero and Screen:scaleBySize(240) or Screen:scaleBySize(75)
+    local gap = Screen:scaleBySize(is_hero and 20 or 10)
     local text_w = card_w - cover_w - gap
 
     local meta = getCoverAndProps(entry.path) or {}
@@ -255,7 +288,7 @@ function AnanyaHome:buildBookCard(entry, card_w, opts)
 
     local title_widget = TextWidget:new{
         text = meta.title or entry.name,
-        face = Font:getFace("tfont", is_hero and 20 or 15),
+        face = Font:getFace("tfont", is_hero and 22 or 15),
         max_width = text_w,
     }
 
@@ -263,7 +296,7 @@ function AnanyaHome:buildBookCard(entry, card_w, opts)
     if meta.authors then
         author_widget = TextWidget:new{
             text = meta.authors,
-            face = Font:getFace("cfont", is_hero and 15 or 12),
+            face = Font:getFace("cfont", is_hero and 16 or 12),
             fgcolor = Blitbuffer.COLOR_DARK_GRAY,
             max_width = text_w,
         }
@@ -294,7 +327,7 @@ function AnanyaHome:buildBookCard(entry, card_w, opts)
     if is_hero and meta.description then
         table.insert(text_col, TextBoxWidget:new{
             text = truncateText(meta.description, 260),
-            face = Font:getFace("cfont", 13),
+            face = Font:getFace("cfont", 14),
             fgcolor = Blitbuffer.COLOR_DARK_GRAY,
             width = text_w,
         })
@@ -329,9 +362,7 @@ function AnanyaHome:buildBookCard(entry, card_w, opts)
 
     return ReadingRow:new{
         callback = function()
-            local ReaderUI = require("apps/reader/readerui")
-            UIManager:close(self)
-            ReaderUI:showReader(entry.path)
+            safeOpenBook(entry.path)
         end,
         framed,
     }
@@ -423,9 +454,7 @@ function AnanyaHome:buildRecentCoverItem(entry, item_w, item_h)
 
     return ReadingRow:new{
         callback = function()
-            local ReaderUI = require("apps/reader/readerui")
-            UIManager:close(self)
-            ReaderUI:showReader(entry.path)
+            safeOpenBook(entry.path)
         end,
         col,
     }
@@ -449,9 +478,14 @@ function AnanyaHome:buildRecentBooksSection(content_w)
             fgcolor = Blitbuffer.COLOR_DARK_GRAY,
         }
     else
-        -- Fixed 5-slot width regardless of how many books are actually
-        -- present, so cover sizing stays consistent as your history fills
-        -- in, rather than growing/shrinking per render.
+        -- Fixed division by RECENT_SLOT_COUNT (5), regardless of how many
+        -- books are actually present. This is what the reference image
+        -- shows: 5 comfortably-sized covers filling the row. (An earlier
+        -- version divided by the ACTUAL count instead, which made covers
+        -- balloon when only 2-3 books existed; a later version went too
+        -- far the other way with a tiny fixed size. This is the middle
+        -- ground: consistent, screenshot-matching size, with unused space
+        -- on the right if you have fewer than 5 recent books.)
         local gap = Screen:scaleBySize(10)
         local item_w = math.floor((content_w - gap * (RECENT_SLOT_COUNT - 1)) / RECENT_SLOT_COUNT)
         local item_h = math.floor(item_w * 1.5) -- typical book cover aspect ratio
@@ -475,40 +509,6 @@ function AnanyaHome:buildRecentBooksSection(content_w)
 end
 
 -- ---------------------------------------------------------------------------
--- "Stats" section — placeholder for now, per your request.
--- ---------------------------------------------------------------------------
-
-function AnanyaHome:buildStatsSection(content_w)
-    local face_h2 = Font:getFace("tfont", 18)
-    local heading = TextWidget:new{ text = _("Stats"), face = face_h2 }
-
-    local placeholder = FrameContainer:new{
-        width = content_w,
-        height = Screen:scaleBySize(90),
-        bordersize = Size.border.window,
-        color = Blitbuffer.COLOR_LIGHT_GRAY,
-        background = Blitbuffer.COLOR_WHITE,
-        radius = 0,
-        margin = 0,
-        CenterContainer:new{
-            dimen = Geom:new{ w = content_w, h = Screen:scaleBySize(90) },
-            TextWidget:new{
-                text = _("Coming soon"),
-                face = Font:getFace("cfont", 15),
-                fgcolor = Blitbuffer.COLOR_DARK_GRAY,
-            },
-        },
-    }
-
-    return VerticalGroup:new{
-        align = "left",
-        heading,
-        VerticalSpan:new{ width = Screen:scaleBySize(8) },
-        placeholder,
-    }
-end
-
--- ---------------------------------------------------------------------------
 -- Layout
 -- ---------------------------------------------------------------------------
 
@@ -517,21 +517,6 @@ function AnanyaHome:buildUI()
     local side_margin = Screen:scaleBySize(16)
     local content_w = screen_w - 2 * side_margin
 
-    -- ScrollableContainer always shows a vertical scrollbar here (our
-    -- content is normally taller than one screen). When it does, it
-    -- RE-CHECKS whether a horizontal scrollbar is ALSO needed by
-    -- comparing content width against (dimen.w - 3*scrollbar_width) — not
-    -- dimen.w itself. If our content fills the full content_w, that check
-    -- always false-positives, which was BOTH the phantom bar at the
-    -- bottom (issue: extra status bar) AND the content getting visually
-    -- cropped/shifted (issue: progress bar pushed to the right — that was
-    -- KOReader thinking horizontal scroll was needed and showing a
-    -- shifted viewport). Building the actual content narrower than
-    -- content_w by this same margin fixes both at the root, rather than
-    -- being a cosmetic patch.
-    local scrollbar_reserve = Screen:scaleBySize(20) -- 3x default scroll_bar_width(6) + a hair of margin
-    local inner_w = content_w - scrollbar_reserve
-
     local header = Header.build{ on_close = function() self:onClose() end }
     local bottom_nav = BottomNav.build("home", function(target_id)
         self:switchTo(target_id)
@@ -539,30 +524,41 @@ function AnanyaHome:buildUI()
 
     local content_h = screen_h - Header.HEIGHT - BottomNav.HEIGHT
 
+    -- NOTE: deliberately NOT using ScrollableContainer here anymore. Its
+    -- false-positive horizontal-scrollbar logic (triggers whenever a
+    -- vertical scrollbar shows AND content fills the full width) was the
+    -- root of a whole recurring bug class here: a phantom bar at the
+    -- bottom, content getting visually shifted/cropped, and even text
+    -- losing its first characters (the viewport was panned). This page's
+    -- content is bounded — one hero card and a small row of covers — so
+    -- it's sized to simply fit without scrolling at all, which is also
+    -- what was explicitly asked for: no scroll, content stays on-page.
     local body = VerticalGroup:new{
         align = "left",
-        self:buildCurrentlyReadingSection(inner_w),
-        VerticalSpan:new{ width = Screen:scaleBySize(24) },
-        self:buildRecentBooksSection(inner_w),
-        VerticalSpan:new{ width = Screen:scaleBySize(24) },
-        self:buildStatsSection(inner_w),
+        self:buildCurrentlyReadingSection(content_w),
+        VerticalSpan:new{ width = Screen:scaleBySize(20) },
+        self:buildRecentBooksSection(content_w),
     }
 
-    -- Wrap in a scroll container if available, so a long "currently
-    -- reading" list doesn't get clipped by the fixed content height.
-    local scrollable_body
-    if ScrollableContainer then
-        scrollable_body = ScrollableContainer:new{
-            dimen = Geom:new{ w = content_w, h = content_h },
-            body,
-        }
-        -- ScrollableContainer's own docs require the widget passed to
-        -- UIManager:show() (that's us) to expose this, or repaint/invert
-        -- flashing can leak outside the scrollable area.
-        self.cropping_widget = scrollable_body
-    else
-        scrollable_body = body
-    end
+    -- IMPORTANT: FrameContainer:getSize() (used just below) always
+    -- computes its reported size from its CHILD's actual content size —
+    -- it ignores its own explicit width/height fields for that purpose
+    -- (those only affect what gets painted, not what's reported to the
+    -- parent for layout). Since body is now shorter than content_h (more
+    -- so after removing the Stats placeholder), content_area was
+    -- reporting a shorter-than-intended height to the page below, which
+    -- left bottom_nav positioned above where it should be — a visible
+    -- gap between it and the true bottom edge, with white background
+    -- showing through underneath. A plain WidgetContainer with an
+    -- explicit `dimen` DOES honor that fixed size for getSize(), and
+    -- paints its child at the top-left with no extra offset, so wrapping
+    -- body in one forces content_area to correctly report the full
+    -- content_h, and bottom_nav ends up exactly where it belongs.
+    local body_top_pad = Screen:scaleBySize(16)
+    local forced_body = WidgetContainer:new{
+        dimen = Geom:new{ w = content_w, h = content_h - body_top_pad },
+        body,
+    }
 
     local content_area = FrameContainer:new{
         width = screen_w,
@@ -570,9 +566,10 @@ function AnanyaHome:buildUI()
         bordersize = 0, margin = 0,
         padding_left = side_margin,
         padding_right = side_margin,
-        padding_top = Screen:scaleBySize(16),
+        padding_top = body_top_pad,
+        padding_bottom = 0,
         background = Blitbuffer.COLOR_WHITE,
-        scrollable_body,
+        forced_body,
     }
 
     local page = VerticalGroup:new{

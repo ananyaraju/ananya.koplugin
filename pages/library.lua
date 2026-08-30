@@ -49,6 +49,23 @@ local logger = require("logger")
 local util = require("util")
 local _ = require("gettext")
 
+-- Same helper as home.lua: wraps opening a book in pcall so any error
+-- (bad file, corrupt document, whatever) shows a message instead of
+-- taking the app down.
+local function safeOpenBook(path)
+    local ok, err = pcall(function()
+        local ReaderUI = require("apps/reader/readerui")
+        ReaderUI:showReader(path)
+    end)
+    if not ok then
+        logger.warn("Ananya: failed to open book ->", tostring(path), tostring(err))
+        local InfoMessage = require("ui/widget/infomessage")
+        UIManager:show(InfoMessage:new{
+            text = _("Couldn't open that book. It may be missing or corrupted."),
+        })
+    end
+end
+
 local function safeRequire(name, fallback)
     local ok, mod_or_err = pcall(require, name)
     if ok then return mod_or_err end
@@ -106,6 +123,13 @@ end
 function AnanyaLibrary:onClose()
     UIManager:close(self)
     return true
+end
+
+-- See home.lua's onShowingReader for the full explanation: this is the
+-- correct, koreader-native way to close ourselves when a book opens,
+-- instead of manually closing right before calling showReader().
+function AnanyaLibrary:onShowingReader()
+    self:onClose()
 end
 
 function AnanyaLibrary:switchTo(target_id)
@@ -177,9 +201,7 @@ function AnanyaLibrary:buildBookRow(entry, row_w)
     }
     return BookRow:new{
         callback = function()
-            local ReaderUI = require("apps/reader/readerui")
-            UIManager:close(self)
-            ReaderUI:showReader(entry.path)
+            safeOpenBook(entry.path)
         end,
         framed,
     }
