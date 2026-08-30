@@ -75,4 +75,40 @@ function LibraryScan.getCurrentlyReading(all_files)
     return reading
 end
 
+-- Returns up to `limit` most recently opened books under LibraryScan.root,
+-- most-recent-first. Uses KOReader's own ReadHistory (already maintained
+-- by the app every time any book is opened) rather than tracking this
+-- ourselves — ReadHistory.hist is kept in most-recent-first order.
+function LibraryScan.getRecentBooks(limit)
+    limit = limit or 5
+    local ok, ReadHistory = pcall(require, "readhistory")
+    if not ok then
+        return {}
+    end
+    local ok_bl, BookList = pcall(require, "ui/widget/booklist")
+    local recent = {}
+    for _, item in ipairs(ReadHistory.hist) do
+        -- ReadHistory logs every file ever opened in KOReader (images
+        -- viewed, text logs, whatever) — not just books. Filter to the
+        -- same supported book/manga extensions used for library scanning,
+        -- otherwise things like a viewed .jpeg wallpaper show up here too.
+        local ext = item.file and item.file:match("%.([%a%d]+)$")
+        if item.file and ext and SUPPORTED_EXTENSIONS[ext:lower()]
+            and item.file:sub(1, #LibraryScan.root) == LibraryScan.root then
+            local percent = 0
+            if ok_bl then
+                local ok_info, info = pcall(BookList.getBookInfo, item.file)
+                if ok_info and info then
+                    percent = info.percent_finished or 0
+                end
+            end
+            table.insert(recent, { path = item.file, name = item.text, percent = percent })
+            if #recent >= limit then
+                break
+            end
+        end
+    end
+    return recent
+end
+
 return LibraryScan

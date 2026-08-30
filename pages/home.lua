@@ -24,6 +24,7 @@ do
     ScrollableContainer = ok and mod or nil
 end
 local Size = require("ui/size")
+local TextBoxWidget = require("ui/widget/textboxwidget")
 local TextWidget = require("ui/widget/textwidget")
 local UIManager = require("ui/uimanager")
 local VerticalGroup = require("ui/widget/verticalgroup")
@@ -51,6 +52,7 @@ local BottomNav = safeRequire("widgets/bottomnav", {
 local LibraryScan = safeRequire("data/library_scan", {
     getAllFiles = function() return {} end,
     getCurrentlyReading = function() return {} end,
+    getRecentBooks = function() return {} end,
 })
 
 local Screen = Device.screen
@@ -197,10 +199,29 @@ local function getCoverAndProps(path)
     return nil
 end
 
-function AnanyaHome:buildReadingCard(entry, card_w)
-    local cover_w = Screen:scaleBySize(60)
-    local cover_h = Screen:scaleBySize(90)
-    local gap = Screen:scaleBySize(12)
+-- Truncates text to roughly max_chars, breaking at the last whole word
+-- rather than mid-word, and appending an ellipsis. Used for the
+-- description preview so a long blurb doesn't blow up the card.
+local function truncateText(text, max_chars)
+    if not text or #text <= max_chars then
+        return text
+    end
+    local cut = text:sub(1, max_chars):gsub("%s+%S*$", "")
+    return cut .. "\u{2026}" -- …
+end
+
+-- One shared card builder for both the big "Currently Reading" hero card
+-- and the smaller "Recent Books" rows. opts:
+--   size            "hero" (large, with description) or "compact" (small)
+--   show_progress   whether to draw the progress bar + "X% Read" label
+--   percent         0..1, required if show_progress is true
+function AnanyaHome:buildBookCard(entry, card_w, opts)
+    opts = opts or {}
+    local is_hero = opts.size == "hero"
+
+    local cover_w = is_hero and Screen:scaleBySize(110) or Screen:scaleBySize(50)
+    local cover_h = is_hero and Screen:scaleBySize(165) or Screen:scaleBySize(75)
+    local gap = Screen:scaleBySize(is_hero and 16 or 10)
     local text_w = card_w - cover_w - gap
 
     local meta = getCoverAndProps(entry.path) or {}
@@ -233,36 +254,65 @@ function AnanyaHome:buildReadingCard(entry, card_w)
 
     local title_widget = TextWidget:new{
         text = meta.title or entry.name,
-        face = Font:getFace("tfont", 16),
+        face = Font:getFace("tfont", is_hero and 20 or 15),
         max_width = text_w,
     }
 
-    local bar_h = Screen:scaleBySize(6)
-    local percent_label = TextWidget:new{
-        text = string.format("%d%% Read", math.floor(entry.percent * 100)),
-        face = Font:getFace("cfont", 12),
-        fgcolor = Blitbuffer.COLOR_DARK_GRAY,
-    }
+    local author_widget = nil
+    if meta.authors then
+        author_widget = TextWidget:new{
+            text = meta.authors,
+            face = Font:getFace("cfont", is_hero and 15 or 12),
+            fgcolor = Blitbuffer.COLOR_DARK_GRAY,
+            max_width = text_w,
+        }
+    end
+
+    -- The progress bar previously always stretched to the FULL remaining
+    -- card width (text_w), which looked badly disproportionate next to a
+    -- short title/author ("misaligned" in your screenshot — the bar ran
+    -- much wider than the text above it). Size it to the text block's own
+    -- width instead, so it visually belongs to that text, with a sensible
+    -- minimum so a very short title doesn't produce a stub-sized bar.
+    local text_block_w = title_widget:getSize().w
+    if author_widget then
+        text_block_w = math.max(text_block_w, author_widget:getSize().w)
+    end
+    local bar_w = math.min(text_w, math.max(text_block_w, Screen:scaleBySize(140)))
 
     -- Build the text column with table.insert (never a nil hole in the
     -- middle of a widget-group's array, which would break its iteration).
-    local text_col = VerticalGroup:new{}
+    local text_col = VerticalGroup:new{ align = "left" }
     table.insert(text_col, title_widget)
     table.insert(text_col, VerticalSpan:new{ width = Screen:scaleBySize(4) })
-    if meta.authors then
-        table.insert(text_col, TextWidget:new{
-            text = meta.authors,
+
+    if author_widget then
+        table.insert(text_col, author_widget)
+        table.insert(text_col, VerticalSpan:new{ width = Screen:scaleBySize(is_hero and 8 or 4) })
+    end
+
+    -- Description preview — hero cards only, truncated to keep the card
+    -- from growing unbounded (some epub descriptions run for paragraphs).
+    if is_hero and meta.description then
+        table.insert(text_col, TextBoxWidget:new{
+            text = truncateText(meta.description, 260),
             face = Font:getFace("cfont", 13),
             fgcolor = Blitbuffer.COLOR_DARK_GRAY,
-            max_width = text_w,
+            width = text_w,
         })
-        table.insert(text_col, VerticalSpan:new{ width = Screen:scaleBySize(8) })
-    else
-        table.insert(text_col, VerticalSpan:new{ width = Screen:scaleBySize(4) })
+        table.insert(text_col, VerticalSpan:new{ width = Screen:scaleBySize(10) })
     end
-    table.insert(text_col, buildProgressBar(entry.percent, text_w, bar_h))
-    table.insert(text_col, VerticalSpan:new{ width = Screen:scaleBySize(4) })
-    table.insert(text_col, percent_label)
+
+    if opts.show_progress then
+        local bar_h = Screen:scaleBySize(is_hero and 10 or 6)
+        table.insert(text_col, buildProgressBar(opts.percent, bar_w, bar_h))
+        table.insert(text_col, VerticalSpan:new{ width = Screen:scaleBySize(4) })
+        table.insert(text_col, TextWidget:new{
+            text = string.format("%d%% Read", math.floor((opts.percent or 0) * 100)),
+            face = Font:getFace("cfont", is_hero and 13 or 11),
+            fgcolor = Blitbuffer.COLOR_DARK_GRAY,
+        })
+    end
 
     local row = HorizontalGroup:new{
         cover_widget,
@@ -274,8 +324,8 @@ function AnanyaHome:buildReadingCard(entry, card_w)
         width = card_w,
         bordersize = 0,
         margin = 0,
-        padding_top = Screen:scaleBySize(8),
-        padding_bottom = Screen:scaleBySize(8),
+        padding_top = Screen:scaleBySize(is_hero and 12 or 6),
+        padding_bottom = Screen:scaleBySize(is_hero and 12 or 6),
         row,
     }
 
@@ -290,7 +340,7 @@ function AnanyaHome:buildReadingCard(entry, card_w)
 end
 
 function AnanyaHome:buildCurrentlyReadingSection(content_w)
-    local face_h2 = Font:getFace("tfont", 18)
+    local face_h2 = Font:getFace("tfont", 20)
     local heading = TextWidget:new{ text = _("Currently Reading"), face = face_h2 }
 
     local ok, reading = pcall(LibraryScan.getCurrentlyReading)
@@ -307,14 +357,123 @@ function AnanyaHome:buildCurrentlyReadingSection(content_w)
             fgcolor = Blitbuffer.COLOR_DARK_GRAY,
         }
     else
-        local rows = VerticalGroup:new{}
+        local rows = VerticalGroup:new{ align = "left" }
         for _, entry in ipairs(reading) do
-            table.insert(rows, self:buildReadingCard(entry, content_w))
+            table.insert(rows, self:buildBookCard(entry, content_w, {
+                size = "hero",
+                show_progress = true,
+                percent = entry.percent,
+            }))
         end
         body = rows
     end
 
     return VerticalGroup:new{
+        align = "left",
+        heading,
+        VerticalSpan:new{ width = Screen:scaleBySize(10) },
+        body,
+    }
+end
+
+-- ---------------------------------------------------------------------------
+-- "Recent Books" section — 5 most recently opened books (via KOReader's
+-- own ReadHistory), shown as a horizontal shelf: cover + percent caption
+-- only, no title/author, matching the reference design.
+-- ---------------------------------------------------------------------------
+
+local RECENT_SLOT_COUNT = 5
+
+function AnanyaHome:buildRecentCoverItem(entry, item_w, item_h)
+    local meta = getCoverAndProps(entry.path) or {}
+
+    local cover_widget
+    if meta.cover then
+        cover_widget = ImageWidget:new{
+            image = meta.cover,
+            width = item_w,
+            height = item_h,
+            scale_factor = 0,
+        }
+    else
+        cover_widget = FrameContainer:new{
+            width = item_w,
+            height = item_h,
+            bordersize = Size.border.window,
+            color = Blitbuffer.COLOR_LIGHT_GRAY,
+            background = Blitbuffer.COLOR_WHITE,
+            margin = 0,
+            padding = 0,
+            CenterContainer:new{
+                dimen = Geom:new{ w = item_w, h = item_h },
+                TextWidget:new{ text = "", face = Font:getFace("cfont", 9) },
+            },
+        }
+    end
+
+    local percent_label = TextWidget:new{
+        text = string.format("%d%% Read", math.floor((entry.percent or 0) * 100)),
+        face = Font:getFace("cfont", 11),
+        fgcolor = Blitbuffer.COLOR_DARK_GRAY,
+    }
+
+    local col = VerticalGroup:new{
+        align = "center",
+        cover_widget,
+        VerticalSpan:new{ width = Screen:scaleBySize(6) },
+        CenterContainer:new{
+            dimen = Geom:new{ w = item_w, h = percent_label:getSize().h },
+            percent_label,
+        },
+    }
+
+    return ReadingRow:new{
+        callback = function()
+            local ReaderUI = require("apps/reader/readerui")
+            UIManager:close(self)
+            ReaderUI:showReader(entry.path)
+        end,
+        col,
+    }
+end
+
+function AnanyaHome:buildRecentBooksSection(content_w)
+    local face_h2 = Font:getFace("tfont", 18)
+    local heading = TextWidget:new{ text = _("Recent Books"), face = face_h2 }
+
+    local ok, recent = pcall(LibraryScan.getRecentBooks, RECENT_SLOT_COUNT)
+    if not ok then
+        logger.warn("Ananya: getRecentBooks failed ->", tostring(recent))
+        recent = {}
+    end
+
+    local body
+    if #recent == 0 then
+        body = TextWidget:new{
+            text = _("No recently opened books yet."),
+            face = Font:getFace("cfont", 15),
+            fgcolor = Blitbuffer.COLOR_DARK_GRAY,
+        }
+    else
+        -- Fixed 5-slot width regardless of how many books are actually
+        -- present, so cover sizing stays consistent as your history fills
+        -- in, rather than growing/shrinking per render.
+        local gap = Screen:scaleBySize(10)
+        local item_w = math.floor((content_w - gap * (RECENT_SLOT_COUNT - 1)) / RECENT_SLOT_COUNT)
+        local item_h = math.floor(item_w * 1.5) -- typical book cover aspect ratio
+
+        local row = HorizontalGroup:new{}
+        for i, entry in ipairs(recent) do
+            table.insert(row, self:buildRecentCoverItem(entry, item_w, item_h))
+            if i < #recent then
+                table.insert(row, HorizontalSpan:new{ width = gap })
+            end
+        end
+        body = row
+    end
+
+    return VerticalGroup:new{
+        align = "left",
         heading,
         VerticalSpan:new{ width = Screen:scaleBySize(8) },
         body,
@@ -348,6 +507,7 @@ function AnanyaHome:buildStatsSection(content_w)
     }
 
     return VerticalGroup:new{
+        align = "left",
         heading,
         VerticalSpan:new{ width = Screen:scaleBySize(8) },
         placeholder,
@@ -386,7 +546,10 @@ function AnanyaHome:buildUI()
     local content_h = screen_h - Header.HEIGHT - BottomNav.HEIGHT
 
     local body = VerticalGroup:new{
+        align = "left",
         self:buildCurrentlyReadingSection(inner_w),
+        VerticalSpan:new{ width = Screen:scaleBySize(24) },
+        self:buildRecentBooksSection(inner_w),
         VerticalSpan:new{ width = Screen:scaleBySize(24) },
         self:buildStatsSection(inner_w),
     }
@@ -419,6 +582,7 @@ function AnanyaHome:buildUI()
     }
 
     local page = VerticalGroup:new{
+        align = "left",
         header,
         content_area,
         bottom_nav,

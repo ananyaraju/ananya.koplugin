@@ -311,7 +311,7 @@ function AnanyaLibrary:buildUI()
     }
 
     -- ── Book list ────────────────────────────────────────────────────
-    local rows = VerticalGroup:new{}
+    local rows = VerticalGroup:new{ align = "left" }
     if #visible_files == 0 then
         table.insert(rows, TextWidget:new{
             text = self.search_query and _("No matches.") or _("No books found under Ananya/."),
@@ -347,6 +347,7 @@ function AnanyaLibrary:buildUI()
         padding_top = Screen:scaleBySize(16),
         background = Blitbuffer.COLOR_WHITE,
         VerticalGroup:new{
+            align = "left",
             toolbar,
             VerticalSpan:new{ width = Screen:scaleBySize(8) },
             list_area,
@@ -354,6 +355,7 @@ function AnanyaLibrary:buildUI()
     }
 
     local page = VerticalGroup:new{
+        align = "left",
         header,
         content_area,
         bottom_nav,

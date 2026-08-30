@@ -136,6 +136,7 @@ function BottomNav.build(active_id, on_switch)
     }
 
     return VerticalGroup:new{
+        align = "left",
         top_rule,
         FrameContainer:new{
             width = screen_w,

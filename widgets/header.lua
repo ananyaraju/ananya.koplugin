@@ -204,6 +204,7 @@ function Header._buildInner(opts)
     }
 
     return VerticalGroup:new{
+        align = "left",
         FrameContainer:new{
             width = screen_w,
             height = BAR_H,
@@ -255,6 +256,7 @@ function Header._buildFallback(opts)
     }
 
     return VerticalGroup:new{
+        align = "left",
         FrameContainer:new{
             width = screen_w,
             height = BAR_H,
