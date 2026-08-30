@@ -111,4 +111,34 @@ function LibraryScan.getRecentBooks(limit)
     return recent
 end
 
+-- Returns the single most-recently-opened book (via ReadHistory, so
+-- "most recent" means recency, not progress) that is not marked
+-- complete, or nil if there isn't one. Used for a single-book "Currently
+-- Reading" section rather than listing every in-progress book.
+function LibraryScan.getLastOpenedInProgress()
+    local ok, ReadHistory = pcall(require, "readhistory")
+    if not ok then
+        return nil
+    end
+    local ok_bl, BookList = pcall(require, "ui/widget/booklist")
+    if not ok_bl then
+        return nil
+    end
+    for _, item in ipairs(ReadHistory.hist) do
+        local ext = item.file and item.file:match("%.([%a%d]+)$")
+        if item.file and ext and SUPPORTED_EXTENSIONS[ext:lower()]
+            and item.file:sub(1, #LibraryScan.root) == LibraryScan.root then
+            local ok_info, info = pcall(BookList.getBookInfo, item.file)
+            if ok_info and info and info.been_opened and info.status ~= "complete" then
+                return {
+                    path = item.file,
+                    name = item.text,
+                    percent = info.percent_finished or 0,
+                }
+            end
+        end
+    end
+    return nil
+end
+
 return LibraryScan

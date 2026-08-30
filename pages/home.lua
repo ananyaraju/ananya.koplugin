@@ -53,6 +53,7 @@ local LibraryScan = safeRequire("data/library_scan", {
     getAllFiles = function() return {} end,
     getCurrentlyReading = function() return {} end,
     getRecentBooks = function() return {} end,
+    getLastOpenedInProgress = function() return nil end,
 })
 
 local Screen = Device.screen
@@ -268,17 +269,14 @@ function AnanyaHome:buildBookCard(entry, card_w, opts)
         }
     end
 
-    -- The progress bar previously always stretched to the FULL remaining
-    -- card width (text_w), which looked badly disproportionate next to a
-    -- short title/author ("misaligned" in your screenshot — the bar ran
-    -- much wider than the text above it). Size it to the text block's own
-    -- width instead, so it visually belongs to that text, with a sensible
-    -- minimum so a very short title doesn't produce a stub-sized bar.
-    local text_block_w = title_widget:getSize().w
-    if author_widget then
-        text_block_w = math.max(text_block_w, author_widget:getSize().w)
-    end
-    local bar_w = math.min(text_w, math.max(text_block_w, Screen:scaleBySize(140)))
+    -- NOTE: an earlier version capped this bar's width to match the
+    -- title/author text above it, thinking a full-width bar looked
+    -- "misaligned". That diagnosis was wrong — the actual cause of that
+    -- misalignment was VerticalGroup's default center-alignment (fixed
+    -- separately), not the bar's width. Capping it made it look too
+    -- small/disconnected from the card. Reverted to the full text_w,
+    -- which is the correct, expected look (matches Kindle/Play Books
+    -- style progress bars spanning the text column's full width).
 
     -- Build the text column with table.insert (never a nil hole in the
     -- middle of a widget-group's array, which would break its iteration).
@@ -305,7 +303,7 @@ function AnanyaHome:buildBookCard(entry, card_w, opts)
 
     if opts.show_progress then
         local bar_h = Screen:scaleBySize(is_hero and 10 or 6)
-        table.insert(text_col, buildProgressBar(opts.percent, bar_w, bar_h))
+        table.insert(text_col, buildProgressBar(opts.percent, text_w, bar_h))
         table.insert(text_col, VerticalSpan:new{ width = Screen:scaleBySize(4) })
         table.insert(text_col, TextWidget:new{
             text = string.format("%d%% Read", math.floor((opts.percent or 0) * 100)),
@@ -343,29 +341,25 @@ function AnanyaHome:buildCurrentlyReadingSection(content_w)
     local face_h2 = Font:getFace("tfont", 20)
     local heading = TextWidget:new{ text = _("Currently Reading"), face = face_h2 }
 
-    local ok, reading = pcall(LibraryScan.getCurrentlyReading)
+    local ok, entry = pcall(LibraryScan.getLastOpenedInProgress)
     if not ok then
-        logger.warn("Ananya: getCurrentlyReading failed ->", tostring(reading))
-        reading = {}
+        logger.warn("Ananya: getLastOpenedInProgress failed ->", tostring(entry))
+        entry = nil
     end
 
     local body
-    if #reading == 0 then
+    if not entry then
         body = TextWidget:new{
             text = _("Nothing in progress yet."),
             face = Font:getFace("cfont", 15),
             fgcolor = Blitbuffer.COLOR_DARK_GRAY,
         }
     else
-        local rows = VerticalGroup:new{ align = "left" }
-        for _, entry in ipairs(reading) do
-            table.insert(rows, self:buildBookCard(entry, content_w, {
-                size = "hero",
-                show_progress = true,
-                percent = entry.percent,
-            }))
-        end
-        body = rows
+        body = self:buildBookCard(entry, content_w, {
+            size = "hero",
+            show_progress = true,
+            percent = entry.percent,
+        })
     end
 
     return VerticalGroup:new{
