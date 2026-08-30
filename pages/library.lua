@@ -13,9 +13,13 @@
 -- itself does NOT reuse the stock Menu widget for its library either — it
 -- has its own hand-built list engine (engines/sui_book_grid.lua) for
 -- exactly this reason. This version follows that lead: the book list here
--- is custom rows (same recipe as Home's "Currently Reading" rows) inside
--- a ScrollableContainer, which is the same proven, already-working
--- pattern from pages/home.lua.
+-- is custom rows (same recipe as Home's "Currently Reading" rows). It
+-- does NOT use ScrollableContainer for scrolling — that component caused
+-- a whole recurring bug class on the home page (false-positive
+-- scrollbar, viewport panning, clipped text) and was the prime suspect
+-- for a crash reported on this page too, so it's been removed here as
+-- well. Trade-off: a very long book list may not all fit on one screen
+-- for now.
 --
 -- SEARCH: a "Search" button opens a standalone InputDialog (shown the
 -- normal, correct way — as its own top-level widget via UIManager:show(),
@@ -35,11 +39,6 @@ local GestureRange = require("ui/gesturerange")
 local HorizontalGroup = require("ui/widget/horizontalgroup")
 local HorizontalSpan = require("ui/widget/horizontalspan")
 local InputContainer = require("ui/widget/container/inputcontainer")
-local ScrollableContainer
-do
-    local ok, mod = pcall(require, "ui/widget/container/scrollablecontainer")
-    ScrollableContainer = ok and mod or nil
-end
 local Size = require("ui/size")
 local TextWidget = require("ui/widget/textwidget")
 local UIManager = require("ui/uimanager")
@@ -173,7 +172,13 @@ end
 local BookRow = InputContainer:extend{}
 
 function BookRow:init()
-    self.dimen = self[1]:getSize()
+    -- See home.lua's ReadingRow for why this explicit re-wrap matters:
+    -- VerticalGroup/HorizontalGroup's getSize() returns a plain table,
+    -- not a real Geom, which crashes GestureRange:match(). framed here
+    -- is a FrameContainer (safe either way), but this makes the class
+    -- robust regardless of what gets passed as the child in the future.
+    local sz = self[1]:getSize()
+    self.dimen = Geom:new{ x = 0, y = 0, w = sz.w, h = sz.h }
     self.ges_events = {
         Tap = { GestureRange:new{ ges = "tap", range = self.dimen } },
     }
@@ -269,11 +274,6 @@ function AnanyaLibrary:buildUI()
     local screen_w, screen_h = Screen:getWidth(), Screen:getHeight()
     local side_margin = Screen:scaleBySize(16)
     local content_w = screen_w - 2 * side_margin
-    -- See home.lua's buildUI for why this margin exists: ScrollableContainer
-    -- false-positives a horizontal scrollbar whenever a vertical one is
-    -- shown and the content fills the full available width.
-    local scrollbar_reserve = Screen:scaleBySize(20)
-    local inner_w = content_w - scrollbar_reserve
 
     local header = Header.build{ on_close = function() self:onClose() end }
     local bottom_nav = BottomNav.build("library", function(target_id)
@@ -342,23 +342,23 @@ function AnanyaLibrary:buildUI()
         })
     else
         for _, entry in ipairs(visible_files) do
-            table.insert(rows, self:buildBookRow(entry, inner_w))
+            table.insert(rows, self:buildBookRow(entry, content_w))
         end
     end
 
     local content_h = screen_h - Header.HEIGHT - BottomNav.HEIGHT - toolbar_h
         - Screen:scaleBySize(16) -- top padding
 
-    local list_area
-    if ScrollableContainer then
-        list_area = ScrollableContainer:new{
-            dimen = Geom:new{ w = content_w, h = content_h },
-            rows,
-        }
-        self.cropping_widget = list_area
-    else
-        list_area = rows
-    end
+    -- NOTE: no longer using ScrollableContainer here — see home.lua's
+    -- buildUI for the full history of bugs it caused there (false
+    -- positive scrollbar, viewport panning, clipped text). It's the prime
+    -- suspect for this page's reported crash too, and unlike the home
+    -- page's genuinely-bounded content, this list COULD be long — but
+    -- stability comes first. Trade-off: if you have more books than fit
+    -- on one screen, only the first ones (alphabetically) will be
+    -- visible for now; search still works to find a specific book
+    -- regardless of where it'd fall in that list.
+    local list_area = rows
 
     local content_area = FrameContainer:new{
         width = screen_w,

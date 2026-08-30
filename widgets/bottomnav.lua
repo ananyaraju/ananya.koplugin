@@ -59,7 +59,12 @@ BottomNav.HEIGHT = BAR_H + Size.line.thin
 local TabCell = InputContainer:extend{}
 
 function TabCell:init()
-    self.dimen = self[1]:getSize()
+    -- Same defensive re-wrap as home.lua's ReadingRow: cell here is a
+    -- CenterContainer with an explicit dimen (already safe), but this
+    -- guards against the VerticalGroup/HorizontalGroup plain-table
+    -- getSize() bug regardless of future changes.
+    local sz = self[1]:getSize()
+    self.dimen = Geom:new{ x = 0, y = 0, w = sz.w, h = sz.h }
     self.ges_events = {
         Tap = {
             GestureRange:new{ ges = "tap", range = self.dimen },

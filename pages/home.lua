@@ -160,7 +160,18 @@ end
 local ReadingRow = InputContainer:extend{}
 
 function ReadingRow:init()
-    self.dimen = self[1]:getSize()
+    -- IMPORTANT: don't use self[1]:getSize() directly as the GestureRange
+    -- range. VerticalGroup/HorizontalGroup's own getSize() returns a
+    -- PLAIN Lua table ({w=.., h=..}), not a real Geom object — confirmed
+    -- directly from koreader's own source. A plain table has no :contains()
+    -- method, so GestureRange:match() crashes the instant anyone taps
+    -- inside it ("attempt to call method 'contains' (a nil value)"). This
+    -- is exactly why Recent Books (whose row wraps a VerticalGroup)
+    -- crashed while Currently Reading (whose row wraps a FrameContainer,
+    -- which DOES return a proper Geom) did not. Explicitly re-wrapping in
+    -- Geom:new{} here makes this safe regardless of what self[1] is.
+    local sz = self[1]:getSize()
+    self.dimen = Geom:new{ x = 0, y = 0, w = sz.w, h = sz.h }
     self.ges_events = {
         Tap = { GestureRange:new{ ges = "tap", range = self.dimen } },
     }
