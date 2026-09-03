@@ -136,6 +136,10 @@ function AnanyaLibrary:switchTo(target_id)
         UIManager:close(self)
         local AnanyaHome = require("pages/home")
         UIManager:show(AnanyaHome:new{})
+    elseif target_id == "newpage" then
+        UIManager:close(self)
+        local AnanyaNewPage = require("pages/newpage")
+        UIManager:show(AnanyaNewPage:new{})
     end
 end
 

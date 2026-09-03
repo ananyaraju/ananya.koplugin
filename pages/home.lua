@@ -63,11 +63,65 @@ local BottomNav = safeRequire("widgets/bottomnav", {
 local LibraryScan = safeRequire("data/library_scan", {
     getAllFiles = function() return {} end,
     getCurrentlyReading = function() return {} end,
-    getRecentBooks = function() return {} end,
     getLastOpenedInProgress = function() return nil end,
 })
 
 local Screen = Device.screen
+
+-- --------------------------------------------------------------------------
+-- SVG logo (top of the home page)
+-- --------------------------------------------------------------------------
+
+-- Finds this plugin's own installation directory on disk, needed to locate
+-- bundled non-Lua assets (like the logo SVG) by absolute path. This is the
+-- same debug.getinfo-based pattern SimpleUI itself uses for exactly this.
+local function getPluginRoot()
+    local src_info = debug.getinfo(1, "S").source or ""
+    if src_info:sub(1, 1) ~= "@" then
+        return nil
+    end
+    local this_dir = src_info:sub(2):match("^(.*)/[^/]+$") -- .../ananya.koplugin/pages
+    if not this_dir then
+        return nil
+    end
+    local plugin_root = this_dir:match("^(.*)/[^/]+$") -- strip "/pages"
+    if not plugin_root then
+        return nil
+    end
+    if plugin_root:sub(1, 1) ~= "/" then
+        local ok_lfs, lfs = pcall(require, "libs/libkoreader-lfs")
+        local cwd = ok_lfs and lfs and lfs.currentdir()
+        if cwd then
+            plugin_root = cwd .. "/" .. plugin_root
+        end
+    end
+    return plugin_root
+end
+
+-- Renders the bundled logo SVG to a given width, keeping its native aspect
+-- ratio (3574:1359, from the SVG's own viewBox). Uses KOReader's MuPDF-based
+-- SVG renderer specifically, NOT the default NanoSVG one — NanoSVG is a
+-- lightweight parser built for simple icon shapes (paths/fills only, same
+-- as SimpleUI's own icon SVGs) and doesn't suFpport this SVG's pattern-fill
+-- + embedded-raster-image technique (common in exports from design tools).
+-- MuPDF is a full document rendering engine and handles it correctly.
+local function buildLogoWidget(target_w)
+    local ok, widget_or_err = pcall(function()
+        local plugin_root = getPluginRoot()
+        if not plugin_root then return nil end
+        local svg_path = plugin_root .. "/icons/ananyas-kindle.svg"
+        local RenderImage = require("ui/renderimage")
+        local target_h = math.floor(target_w * 1359 / 3574)
+        local bb = RenderImage:renderSVGImageFileWithMupdf(svg_path, target_w, target_h)
+        if not bb then return nil end
+        return ImageWidget:new{ image = bb, width = target_w, height = target_h }
+    end)
+    if ok and widget_or_err then
+        return widget_or_err
+    end
+    logger.warn("Ananya: failed to render logo SVG ->", tostring(widget_or_err))
+    return nil
+end
 
 local AnanyaHome = InputContainer:extend{
     name = "ananya_home",
@@ -123,6 +177,10 @@ function AnanyaHome:switchTo(target_id)
         UIManager:close(self)
         local AnanyaLibrary = require("pages/library")
         UIManager:show(AnanyaLibrary:new{})
+    elseif target_id == "newpage" then
+        UIManager:close(self)
+        local AnanyaNewPage = require("pages/newpage")
+        UIManager:show(AnanyaNewPage:new{})
     end
 end
 
@@ -379,6 +437,30 @@ function AnanyaHome:buildBookCard(entry, card_w, opts)
     }
 end
 
+-- ---------------------------------------------------------------------------
+-- Title image — sits above "Currently Reading", centered on screen.
+-- ---------------------------------------------------------------------------
+
+-- ---------------------------------------------------------------------------
+-- Title image — sits above "Currently Reading", centered on screen.
+-- ---------------------------------------------------------------------------
+
+function AnanyaHome:buildTitleImage(content_w)
+    local img_w = math.floor(content_w * 0.75)
+    local logo_widget = buildLogoWidget(img_w)
+    if not logo_widget then
+        -- Fail safe: an empty (zero-height) spacer, so a missing/corrupt
+        -- SVG or a MuPDF rendering failure degrades to "no image shown"
+        -- rather than breaking the whole home page.
+        return VerticalGroup:new{}
+    end
+    local img_h = math.floor(img_w * 1359 / 3574)
+    return CenterContainer:new{
+        dimen = Geom:new{ w = content_w, h = img_h },
+        logo_widget,
+    }
+end
+
 function AnanyaHome:buildCurrentlyReadingSection(content_w)
     local face_h2 = Font:getFace("tfont", 20)
     local heading = TextWidget:new{ text = _("Currently Reading"), face = face_h2 }
@@ -413,113 +495,6 @@ function AnanyaHome:buildCurrentlyReadingSection(content_w)
 end
 
 -- ---------------------------------------------------------------------------
--- "Recent Books" section — 5 most recently opened books (via KOReader's
--- own ReadHistory), shown as a horizontal shelf: cover + percent caption
--- only, no title/author, matching the reference design.
--- ---------------------------------------------------------------------------
-
-local RECENT_SLOT_COUNT = 5
-
-function AnanyaHome:buildRecentCoverItem(entry, item_w, item_h)
-    local meta = getCoverAndProps(entry.path) or {}
-
-    local cover_widget
-    if meta.cover then
-        cover_widget = ImageWidget:new{
-            image = meta.cover,
-            width = item_w,
-            height = item_h,
-            scale_factor = 0,
-        }
-    else
-        cover_widget = FrameContainer:new{
-            width = item_w,
-            height = item_h,
-            bordersize = Size.border.window,
-            color = Blitbuffer.COLOR_LIGHT_GRAY,
-            background = Blitbuffer.COLOR_WHITE,
-            margin = 0,
-            padding = 0,
-            CenterContainer:new{
-                dimen = Geom:new{ w = item_w, h = item_h },
-                TextWidget:new{ text = "", face = Font:getFace("cfont", 9) },
-            },
-        }
-    end
-
-    local percent_label = TextWidget:new{
-        text = string.format("%d%% Read", math.floor((entry.percent or 0) * 100)),
-        face = Font:getFace("cfont", 11),
-        fgcolor = Blitbuffer.COLOR_DARK_GRAY,
-    }
-
-    local col = VerticalGroup:new{
-        align = "center",
-        cover_widget,
-        VerticalSpan:new{ width = Screen:scaleBySize(6) },
-        CenterContainer:new{
-            dimen = Geom:new{ w = item_w, h = percent_label:getSize().h },
-            percent_label,
-        },
-    }
-
-    return ReadingRow:new{
-        callback = function()
-            safeOpenBook(entry.path)
-        end,
-        col,
-    }
-end
-
-function AnanyaHome:buildRecentBooksSection(content_w)
-    local face_h2 = Font:getFace("tfont", 18)
-    local heading = TextWidget:new{ text = _("Recent Books"), face = face_h2 }
-
-    local ok, recent = pcall(LibraryScan.getRecentBooks, RECENT_SLOT_COUNT)
-    if not ok then
-        logger.warn("Ananya: getRecentBooks failed ->", tostring(recent))
-        recent = {}
-    end
-
-    local body
-    if #recent == 0 then
-        body = TextWidget:new{
-            text = _("No recently opened books yet."),
-            face = Font:getFace("cfont", 15),
-            fgcolor = Blitbuffer.COLOR_DARK_GRAY,
-        }
-    else
-        -- Fixed division by RECENT_SLOT_COUNT (5), regardless of how many
-        -- books are actually present. This is what the reference image
-        -- shows: 5 comfortably-sized covers filling the row. (An earlier
-        -- version divided by the ACTUAL count instead, which made covers
-        -- balloon when only 2-3 books existed; a later version went too
-        -- far the other way with a tiny fixed size. This is the middle
-        -- ground: consistent, screenshot-matching size, with unused space
-        -- on the right if you have fewer than 5 recent books.)
-        local gap = Screen:scaleBySize(10)
-        local item_w = math.floor((content_w - gap * (RECENT_SLOT_COUNT - 1)) / RECENT_SLOT_COUNT)
-        local item_h = math.floor(item_w * 1.5) -- typical book cover aspect ratio
-
-        local row = HorizontalGroup:new{}
-        for i, entry in ipairs(recent) do
-            table.insert(row, self:buildRecentCoverItem(entry, item_w, item_h))
-            if i < #recent then
-                table.insert(row, HorizontalSpan:new{ width = gap })
-            end
-        end
-        body = row
-    end
-
-    return VerticalGroup:new{
-        align = "left",
-        heading,
-        VerticalSpan:new{ width = Screen:scaleBySize(8) },
-        body,
-    }
-end
-
--- ---------------------------------------------------------------------------
 -- Layout
 -- ---------------------------------------------------------------------------
 
@@ -541,14 +516,14 @@ function AnanyaHome:buildUI()
     -- root of a whole recurring bug class here: a phantom bar at the
     -- bottom, content getting visually shifted/cropped, and even text
     -- losing its first characters (the viewport was panned). This page's
-    -- content is bounded — one hero card and a small row of covers — so
-    -- it's sized to simply fit without scrolling at all, which is also
-    -- what was explicitly asked for: no scroll, content stays on-page.
+    -- content is bounded — a title image and one hero card — so it's
+    -- sized to simply fit without scrolling at all, which is also what
+    -- was explicitly asked for: no scroll, content stays on-page.
     local body = VerticalGroup:new{
         align = "left",
+        self:buildTitleImage(content_w),
+        VerticalSpan:new{ width = Screen:scaleBySize(16) },
         self:buildCurrentlyReadingSection(content_w),
-        VerticalSpan:new{ width = Screen:scaleBySize(20) },
-        self:buildRecentBooksSection(content_w),
     }
 
     -- IMPORTANT: FrameContainer:getSize() (used just below) always

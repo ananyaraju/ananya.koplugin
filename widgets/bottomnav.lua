@@ -1,13 +1,14 @@
 -- widgets/bottomnav.lua
--- Persistent bottom navigation bar: Home | Library.
+-- Persistent bottom navigation bar: Home | Library | New Page.
 --
 -- SCOPE: modeled on SimpleUI's screens/sui_bottombar.lua look-and-feel
 -- (icon + label per tab, a thin active-indicator bar pinned to the top of
 -- the active tab, dimmed icon for inactive tabs) but reimplemented from
 -- scratch, much simplified: SimpleUI's actual bottombar is ~1800 lines
 -- supporting per-user icon recoloring, drag-to-reorder, badges, and a
--- config-driven tab list. This version hardcodes exactly two tabs (per
--- your request to drop Settings/History) and skips the theming system.
+-- config-driven tab list. This version hardcodes exactly three tabs
+-- (Settings/History intentionally excluded per an earlier request) and
+-- skips the theming system.
 --
 -- Usage from any page:
 --     local BottomNav = require("widgets/bottomnav")
@@ -45,11 +46,11 @@ local ICON_SZ = Screen:scaleBySize(26)
 local INDIC_H = Screen:scaleBySize(3)
 local LABEL_FS = 12
 
--- The only two tabs this build supports (Settings/History intentionally
--- excluded, per your request).
+-- The three tabs this build supports.
 local TABS = {
     { id = "home",    icon = "home",         label = "Home" },
     { id = "library", icon = "book.opened",  label = "Library" },
+    { id = "newpage", icon = "appbar.menu",  label = "New Page" },
 }
 
 BottomNav.HEIGHT = BAR_H + Size.line.thin
