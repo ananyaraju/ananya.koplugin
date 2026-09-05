@@ -583,9 +583,9 @@ function AnanyaHome:buildUI()
     -- was explicitly asked for: no scroll, content stays on-page.
     local body = VerticalGroup:new{
         align = "left",
-        VerticalSpan:new{ width = Screen:scaleBySize(32) }, -- whitespace above logo
+        VerticalSpan:new{ width = Screen:scaleBySize(44) }, -- whitespace above logo
         self:buildTitleImage(content_w),
-        VerticalSpan:new{ width = Screen:scaleBySize(32) }, -- whitespace below logo
+        VerticalSpan:new{ width = Screen:scaleBySize(44) }, -- whitespace below logo
         self:buildCurrentlyReadingSection(content_w),
     }
 
