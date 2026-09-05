@@ -97,6 +97,7 @@ local LibraryScan = safeRequire("data/library_scan", {
     getBookMeta = function(path, filename) return { title = filename, authors = nil, pages = nil, cover = nil } end,
     getReadStatus = function() return nil, 0 end,
 })
+local SwipeMenu = safeRequire("widgets/swipemenu", { attach = function() end })
 
 local AnanyaLibrary = InputContainer:extend{
     name = "ananya_library",
@@ -116,6 +117,14 @@ function AnanyaLibrary:init()
     if Device:hasKeys() then
         self.key_events.Close = { { Device.input.group.Back } }
     end
+
+    -- Swipe down anywhere in the usual top zone opens a menu, same as
+    -- native KOReader — see widgets/swipemenu.lua for how and why. The
+    -- header's own ✕ button stays as a failsafe alongside this.
+    SwipeMenu.attach(self, {
+        title = _("Ananya"),
+        on_close = function() self:onClose() end,
+    })
 
     self.major_filter = "books"   -- "books" | "manga"
     self.status_filter = "all"    -- "all" | "ongoing" | "completed"
@@ -436,7 +445,7 @@ function AnanyaLibrary:buildUI()
     local side_margin = Screen:scaleBySize(16)
     local content_w = screen_w - 2 * side_margin
 
-    local header = Header.build{ on_close = function() self:onClose() end }
+    local header = Header.build()
     local bottom_nav = BottomNav.build("library", function(target_id)
         self:switchTo(target_id)
     end)

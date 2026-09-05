@@ -1,25 +1,21 @@
 -- widgets/header.lua
 -- Reusable status header for every Ananya page: clock on the left,
--- Wi-Fi status + battery % on the right, and an optional small close (x)
--- button at the far right.
+-- Wi-Fi status + battery % on the right.
 --
--- NOTE ON SCOPE: SimpleUI's top bar (screens/sui_topbar.lua) is a fully
--- configurable status bar because SimpleUI *replaces* the device's home
--- screen. Ananya is a plugin launched from Tools, not a home-screen
--- replacement, so it still needs an explicit way to exit back to the file
--- browser/reader — hence the optional close button, which has no SimpleUI
--- equivalent. Everything else (clock/wifi/battery, snapshot-not-live) is
--- unchanged from before.
+-- The close (✕) button that used to sit here has been removed — now
+-- that swipe-down opens KOReader's real native menu (see
+-- widgets/swipemenu.lua), which includes its own way back out, a
+-- dedicated close button in the header is no longer needed. Each page's
+-- hardware-back-key handling (self.key_events.Close) still works too.
 --
 -- Usage from any page:
 --     local Header = require("widgets/header")
 --     local page = VerticalGroup:new{
---         Header.build{ on_close = function() self:onClose() end },
+--         Header.build(),
 --         ... rest of the page ...
 --     }
 
 local Blitbuffer = require("ffi/blitbuffer")
-local Button = require("ui/widget/button")
 local CenterContainer = require("ui/widget/container/centercontainer")
 local Device = require("device")
 local FrameContainer = require("ui/widget/container/framecontainer")
@@ -48,22 +44,6 @@ local FONT_SIZE = 16
 -- Total height including the bottom divider line. Pages should subtract
 -- this from their own available content height.
 Header.HEIGHT = BAR_H + Size.line.thin
-
--- --------------------------------------------------------------------------
--- Close button.
---
--- NOTE: an earlier version tried to avoid interfering with the Kindle's
--- swipe-down gesture by using InputContainer:registerTouchZones to claim
--- only "hold" (not "tap") over this corner, the same technique SimpleUI
--- uses for its own top bar. That stopped this button from stealing your
--- swipe, but it did NOT restore the actual thing you wanted — KOReader's
--- native Tools/Search menu on swipe-down. That menu is implemented inside
--- the File Manager and Reader screens themselves; Ananya is a separate
--- custom screen that never had that behavior, with or without this
--- button. Reproducing it would mean building Ananya on top of FileManager
--- itself rather than as its own screen — a much bigger change than a
--- button tweak. So this reverts to a plain, reliable tap-to-close button.
--- --------------------------------------------------------------------------
 
 -- --------------------------------------------------------------------------
 -- Small custom battery glyph (outline + fill level + nub), built from plain
@@ -119,8 +99,11 @@ end
 -- toggle, no battery) just quietly omits that piece instead of erroring.
 -- --------------------------------------------------------------------------
 local function getClockText()
-    local twelve_hour = G_reader_settings and G_reader_settings:isTrue("twelve_hour_clock")
-    return datetime.secondsToHour(os.time(), twelve_hour)
+    -- Always 12-hour here, per request — deliberately NOT following
+    -- G_reader_settings' global "twelve_hour_clock" toggle, so Ananya's
+    -- header always shows 12-hour regardless of what the rest of the
+    -- device is set to.
+    return datetime.secondsToHour(os.time(), true)
 end
 
 local function getWifiIcon()
@@ -176,19 +159,6 @@ function Header._buildInner(opts)
         table.insert(right_items, TextWidget:new{ text = capacity .. "%", face = face })
     end
 
-    if opts.on_close then
-        table.insert(right_items, HorizontalSpan:new{ width = Screen:scaleBySize(14) })
-        table.insert(right_items, Button:new{
-            text = "\u{2715}", -- ✕
-            callback = opts.on_close,
-            bordersize = 0,
-            margin = 0,
-            padding = 0,
-            text_font_size = FONT_SIZE + 2,
-            text_font_bold = true,
-        })
-    end
-
     local right_group = HorizontalGroup:new(right_items)
 
     local inner_w = screen_w - Screen:scaleBySize(24)
@@ -223,9 +193,7 @@ function Header._buildInner(opts)
 end
 
 -- --------------------------------------------------------------------------
--- Plain-text fallback: no IconWidget/SVG, no nested battery-fill geometry,
--- but STILL includes the close button if requested, since that one is
--- essential (not decorative) and shouldn't be lost on fallback.
+-- Plain-text fallback: no IconWidget/SVG, no nested battery-fill geometry.
 -- --------------------------------------------------------------------------
 function Header._buildFallback(opts)
     opts = opts or {}
@@ -238,15 +206,6 @@ function Header._buildFallback(opts)
     local ok_batt, capacity = pcall(getBatteryCapacity)
     if ok_batt and capacity then
         table.insert(right_items, TextWidget:new{ text = capacity .. "%", face = face })
-    end
-    if opts.on_close then
-        table.insert(right_items, HorizontalSpan:new{ width = Screen:scaleBySize(14) })
-        table.insert(right_items, Button:new{
-            text = "\u{2715}",
-            callback = opts.on_close,
-            bordersize = 0, margin = 0, padding = 0,
-            text_font_size = FONT_SIZE + 2, text_font_bold = true,
-        })
     end
     local right_group = HorizontalGroup:new(right_items)
 
@@ -278,9 +237,9 @@ function Header._buildFallback(opts)
 end
 
 -- --------------------------------------------------------------------------
--- Public: build the header widget. opts = { on_close = function() ... end }
--- Wrapped in pcall so a build failure degrades to plain text (and, as a
--- last resort, an empty spacer) instead of crashing the page.
+-- Public: build the header widget. Wrapped in pcall so a build failure
+-- degrades to plain text (and, as a last resort, an empty spacer) instead
+-- of crashing the page.
 -- --------------------------------------------------------------------------
 function Header.build(opts)
     local ok, widget_or_err = pcall(Header._buildInner, opts)

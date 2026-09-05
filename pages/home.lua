@@ -65,6 +65,7 @@ local LibraryScan = safeRequire("data/library_scan", {
     getCurrentlyReading = function() return {} end,
     getLastOpenedInProgress = function() return nil end,
 })
+local SwipeMenu = safeRequire("widgets/swipemenu", { attach = function() end })
 
 local Screen = Device.screen
 
@@ -223,6 +224,15 @@ function AnanyaHome:init()
     if Device:hasKeys() then
         self.key_events.Close = { { Device.input.group.Back } }
     end
+
+    -- Swipe down anywhere in the usual top zone opens a menu, same as
+    -- native KOReader — see widgets/swipemenu.lua for how and why. The
+    -- header's own ✕ button stays as a failsafe alongside this, not
+    -- replaced by it, until the menu has more than just "Close" in it.
+    SwipeMenu.attach(self, {
+        title = _("Ananya"),
+        on_close = function() self:onClose() end,
+    })
 
     local ok, err = pcall(function() self:buildUI() end)
     if not ok then
@@ -573,7 +583,7 @@ function AnanyaHome:buildCurrentlyReadingSection(content_w)
     local heading
     if heading_icon then
         heading = HorizontalGroup:new{
-            HorizontalSpan:new{ width = Screen:scaleBySize(4) },
+            HorizontalSpan:new{ width = Screen:scaleBySize(15) },
             heading_icon,
             HorizontalSpan:new{ width = Screen:scaleBySize(6) },
             heading_text,
@@ -622,7 +632,7 @@ function AnanyaHome:buildUI()
     local side_margin = Screen:scaleBySize(16)
     local content_w = screen_w - 2 * side_margin
 
-    local header = Header.build{ on_close = function() self:onClose() end }
+    local header = Header.build()
     local bottom_nav = BottomNav.build("home", function(target_id)
         self:switchTo(target_id)
     end)
