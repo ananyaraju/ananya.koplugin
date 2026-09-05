@@ -94,8 +94,8 @@ local BottomNav = safeRequire("widgets/bottomnav", {
 local LibraryScan = safeRequire("data/library_scan", {
     getBooks = function() return {} end,
     getManga = function() return {} end,
-    getBookMeta = function(path, filename) return { title = filename, pages = nil, cover = nil } end,
-    getReadStatus = function() return nil end,
+    getBookMeta = function(path, filename) return { title = filename, authors = nil, pages = nil, cover = nil } end,
+    getReadStatus = function() return nil, 0 end,
 })
 
 local AnanyaLibrary = InputContainer:extend{
@@ -294,18 +294,19 @@ function BookRow:onTap()
     return true
 end
 
-local ICON_W = Screen:scaleBySize(44)
-local ICON_H = Screen:scaleBySize(62) -- ~2:3, typical book/manga cover ratio
+local ICON_W = Screen:scaleBySize(44) -- fixed, used to reserve text column width
+local ICON_MIN_H = Screen:scaleBySize(62) -- floor for rows with very little text (e.g. no author)
 
--- Builds the small cover-thumbnail icon for a row. Uses `image =` (a
--- pre-decoded BlitBuffer from doc:getCoverPageImage(), same recipe as
--- newpage.lua's Recent Books shelf) rather than `file =`, which matters:
--- ImageWidget's `file =` path runs decoded buffers through its shared
--- 8MB-capped ImageCache before any resize happens if scale_factor is set,
--- which is exactly what crashed the Home page logo earlier. `image =`
--- skips that cache entirely, so scale_factor=0 (best-fit, since covers
--- come in all sorts of aspect ratios unlike our fixed-ratio logo) is safe
--- to use here.
+-- Builds the small cover-thumbnail icon for a row, at an explicit
+-- width/height (sized by the caller to match that row's actual text
+-- column height — see buildBookRow). Uses `image =` (a pre-decoded
+-- BlitBuffer from doc:getCoverPageImage(), same recipe as newpage.lua's
+-- Recent Books shelf) rather than `file =`, which matters: ImageWidget's
+-- `file =` path runs decoded buffers through its shared 8MB-capped
+-- ImageCache before any resize happens if scale_factor is set, which is
+-- exactly what crashed the Home page logo earlier. `image =` skips that
+-- cache entirely, so scale_factor=0 (best-fit, since covers come in all
+-- sorts of aspect ratios unlike our fixed-ratio logo) is safe to use here.
 --
 -- IMPORTANT: image_disposable = false. This cover BlitBuffer comes from
 -- LibraryScan's own metadata cache (LibraryScan._meta_cache), which is
@@ -320,7 +321,7 @@ local ICON_H = Screen:scaleBySize(62) -- ~2:3, typical book/manga cover ratio
 -- already-freed buffer to a new ImageWidget. That's what was crashing on
 -- repeated filter clicks. Setting this to false tells ImageWidget the
 -- buffer is owned elsewhere (by the cache) and must not be freed here.
-local function buildCoverIcon(cover)
+local function buildCoverIcon(cover, icon_w, icon_h)
     if cover then
         local ok_dim, cover_w, cover_h = pcall(function()
             return cover:getWidth(), cover:getHeight()
@@ -332,8 +333,8 @@ local function buildCoverIcon(cover)
     if cover then
         return ImageWidget:new{
             image = cover,
-            width = ICON_W,
-            height = ICON_H,
+            width = icon_w,
+            height = icon_h,
             scale_factor = 0,
             image_disposable = false,
         }
@@ -341,15 +342,15 @@ local function buildCoverIcon(cover)
     -- No cover available (extraction failed, or format has none): a
     -- plain bordered placeholder box instead of leaving a gap.
     return FrameContainer:new{
-        width = ICON_W,
-        height = ICON_H,
+        width = icon_w,
+        height = icon_h,
         bordersize = Size.border.window,
         color = Blitbuffer.COLOR_LIGHT_GRAY,
         background = Blitbuffer.COLOR_WHITE,
         margin = 0,
         padding = 0,
         CenterContainer:new{
-            dimen = Geom:new{ w = ICON_W, h = ICON_H },
+            dimen = Geom:new{ w = icon_w, h = icon_h },
             TextWidget:new{ text = "", face = Font:getFace("cfont", 9) },
         },
     }
@@ -358,32 +359,49 @@ end
 function AnanyaLibrary:buildBookRow(entry, row_w)
     local text_w = row_w - ICON_W - Screen:scaleBySize(12)
 
-    local cover_widget = buildCoverIcon(entry.cover)
-
     local title_widget = TextWidget:new{
         text = entry.title,
         face = Font:getFace("cfont", 16),
         max_width = text_w,
     }
 
-    local pages_text
-    if entry.pages then
-        pages_text = string.format(_("%d pages"), entry.pages)
-    else
-        pages_text = _("Pages unknown")
+    local author_widget = nil
+    if entry.authors then
+        author_widget = TextWidget:new{
+            text = entry.authors,
+            face = Font:getFace("cfont", 14),
+            fgcolor = Blitbuffer.COLOR_DARK_GRAY,
+            max_width = text_w,
+        }
     end
-    local pages_widget = TextWidget:new{
-        text = pages_text,
+
+    -- Pages + read percent on one line, e.g. "234 pages · 42% Read". No
+    -- progress bar per the request — just the number, same as SimpleUI.
+    local pages_text = entry.pages and string.format(_("%d pages"), entry.pages) or _("Pages unknown")
+    local percent_text = string.format(_("%d%% Read"), math.floor((entry.percent or 0) * 100))
+    local meta_widget = TextWidget:new{
+        text = pages_text .. "  ·  " .. percent_text,
         face = Font:getFace("cfont", 13),
         fgcolor = Blitbuffer.COLOR_DARK_GRAY,
     }
 
-    local text_col = VerticalGroup:new{
-        align = "left",
-        title_widget,
-        VerticalSpan:new{ width = Screen:scaleBySize(4) },
-        pages_widget,
-    }
+    local text_col = VerticalGroup:new{ align = "left" }
+    table.insert(text_col, title_widget)
+    table.insert(text_col, VerticalSpan:new{ width = Screen:scaleBySize(2) })
+    if author_widget then
+        table.insert(text_col, author_widget)
+        table.insert(text_col, VerticalSpan:new{ width = Screen:scaleBySize(4) })
+    end
+    table.insert(text_col, meta_widget)
+
+    -- Size the cover to match the text column's actual height, so it
+    -- fills the same vertical space as the title/author/meta stack next
+    -- to it, instead of a fixed height that looks small next to a row
+    -- with an author line versus one without. ICON_MIN_H is a floor for
+    -- unusually short rows (e.g. no author, small fonts) so the cover
+    -- never gets squashed thinner than a sensible minimum.
+    local icon_h = math.max(text_col:getSize().h, ICON_MIN_H)
+    local cover_widget = buildCoverIcon(entry.cover, ICON_W, icon_h)
 
     local row = HorizontalGroup:new{
         cover_widget,
@@ -440,16 +458,20 @@ function AnanyaLibrary:buildUI()
         local ok_meta, meta = pcall(LibraryScan.getBookMeta, f.path, f.name)
         if not ok_meta then
             logger.warn("Ananya: getBookMeta failed ->", tostring(meta))
-            meta = { title = f.name, pages = nil, cover = nil }
+            meta = { title = f.name, authors = nil, pages = nil, cover = nil }
         end
-        local ok_status, status = pcall(LibraryScan.getReadStatus, f.path)
-        if not ok_status then status = nil end
+        local ok_status, status, percent = pcall(LibraryScan.getReadStatus, f.path)
+        if not ok_status then
+            status, percent = nil, 0
+        end
         table.insert(all_entries, {
             path = f.path,
             title = meta.title,
+            authors = meta.authors,
             pages = meta.pages,
             cover = meta.cover,
             status = status,
+            percent = percent or 0,
         })
     end
 

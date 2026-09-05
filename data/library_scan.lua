@@ -175,15 +175,43 @@ end
 -- on disk from scratch on every keystroke.
 LibraryScan._meta_cache = {}
 
--- Extracts { title, pages, cover } for a single book, opening the
--- document only once (via pcall, so a corrupt/unsupported file degrades
--- to filename-based fallbacks instead of taking the page down), then
--- caching the result by path for subsequent calls.
+-- Extracts { title, authors, pages, cover } for a single book, opening
+-- the document only once (via pcall, so a corrupt/unsupported file
+-- degrades to filename-based fallbacks instead of taking the page down),
+-- then caching the result by path for subsequent calls.
 --
 -- `filename` is used as the title fallback (extension stripped) for
 -- formats with no embedded title metadata — this is the normal case for
 -- comic archives (cbz/cbr/cbt), which is most of what lives under
 -- Ananya/Manga.
+--
+-- PAGE COUNT, verified against KOReader's own source
+-- (apps/filemanager/filemanagerbookinfo.lua, the file behind KOReader's
+-- own "Book information" dialog — same problem, "show a page count
+-- without opening the reader", solved there first):
+--   - For a book that has been opened before, an accurate page count is
+--     already cached in its docsettings sidecar (BookList.getBookInfo()
+--     reads it from "doc_pages" / reading-statistics history) — no need
+--     to open the document at all for this.
+--   - For a reflowable format (epub/mobi/fb2/txt — anything CreDocument
+--     handles) that's never been opened, there is NO cheap way to get an
+--     accurate count: crengine only knows real page boundaries after a
+--     full CSS/font layout pass (Document:render()), which is expensive
+--     enough that KOReader's own book-info dialog explicitly declines to
+--     do it, noting that calling getPageCount() without that render pass
+--     first returns a number that's "wrong, often 2 to 3 times" the real
+--     count. So: pages stays nil (shown as "unknown") for a never-opened
+--     book in a reflowable format, on purpose, matching KOReader itself.
+--   - For a fixed-layout format (pdf/djvu/comic archives), getPageCount()
+--     is immediate and accurate with no special loading step, since
+--     "pages" there just means "how many images/pages exist", not
+--     something that depends on reflow.
+--
+-- TITLE/AUTHORS: for CreDocument formats, getProps() only returns real
+-- title/author metadata after the document has actually been loaded —
+-- confirmed against credocument.lua directly (see home.lua's
+-- getCoverAndProps, which hit this exact same issue first). Non-crengine
+-- formats don't need this extra step.
 function LibraryScan.getBookMeta(path, filename)
     local cached = LibraryScan._meta_cache[path]
     if cached then
@@ -192,62 +220,97 @@ function LibraryScan.getBookMeta(path, filename)
 
     local meta = {
         title = filename:gsub("%.[%a%d]+$", ""), -- fallback: filename, no extension
+        authors = nil,
         pages = nil,
         cover = nil,
     }
+
+    -- Fast, safe path first: if this book has been opened before, its
+    -- docsettings sidecar already has an accurate page count cached —
+    -- no document needs to be opened at all to get it.
+    local ok_bl, BookList = pcall(require, "ui/widget/booklist")
+    if ok_bl then
+        local ok_info, info = pcall(BookList.getBookInfo, path)
+        if ok_info and info and info.been_opened and info.pages then
+            meta.pages = info.pages
+        end
+    end
 
     local ok = pcall(function()
         local DocumentRegistry = require("document/documentregistry")
         local doc = DocumentRegistry:openDocument(path)
         if not doc then return end
 
-        local ok_props, props = pcall(function() return doc:getProps() end)
-        if ok_props and props and props.title and props.title ~= "" then
-            meta.title = props.title
+        local loaded = true
+        if doc.loadDocument then
+            -- CreDocument (epub/mobi/fb2/txt/html): needs an explicit
+            -- load before getProps()/getCoverPageImage() return anything
+            -- meaningful — see the big comment above this function.
+            -- Deliberately NOT attempting getPageCount() for these; see
+            -- above for why that would just be an inaccurate number.
+            local ok_load, result = pcall(function() return doc:loadDocument() end)
+            if not ok_load or not result then
+                loaded = false
+            end
+        elseif not meta.pages then
+            -- Fixed-layout formats (pdf/djvu/comic archives): safe and
+            -- accurate immediately, no load step needed. Only bother if
+            -- the sidecar cache above didn't already give us a count.
+            local ok_pages, pages = pcall(function() return doc:getPageCount() end)
+            if ok_pages and pages and pages > 0 then
+                meta.pages = pages
+            end
         end
 
-        local ok_pages, pages = pcall(function() return doc:getPageCount() end)
-        if ok_pages and pages and pages > 0 then
-            meta.pages = pages
-        end
-
-        local ok_cover, cover = pcall(function() return doc:getCoverPageImage() end)
-        if ok_cover and cover then
-            -- Validate dimensions before accepting this cover at all. A
-            -- corrupt or unusual source file (more likely for comic
-            -- archives than for epub/pdf) can hand back a cover with a
-            -- zero width or height. ImageWidget's "scale to fit" math
-            -- does self.width / bb_w — dividing by a zero bb_w produces
-            -- `inf` (Lua doesn't error on float division by zero), which
-            -- then flows into a native buffer-scaling call as a
-            -- nonsensical target size. That's a segfault, not a
-            -- catchable Lua error, and it only actually happens once the
-            -- row gets painted — which is exactly why this only shows up
-            -- under some filters (whichever ones actually render that
-            -- book's row) and not others.
-            local ok_dim, cover_w, cover_h = pcall(function()
-                return cover:getWidth(), cover:getHeight()
-            end)
-            if ok_dim and cover_w and cover_h and cover_w > 0 and cover_h > 0 then
-                -- Copy rather than keep the buffer doc:getCoverPageImage()
-                -- hands back: some backends return a buffer backed
-                -- directly by the document's own internal (e.g. mupdf)
-                -- memory, which is only guaranteed valid while the
-                -- document stays open. Since we cache this cover
-                -- indefinitely (LibraryScan._meta_cache, for the whole
-                -- process lifetime) but the document below is closed
-                -- immediately, an uncopied reference would eventually
-                -- point at freed memory — see the doc:close() note just
-                -- below for why "eventually" here specifically means
-                -- "the next time you open a document from a different
-                -- folder", which is exactly what caused a segfault
-                -- switching Books -> Manga -> Books.
-                local ok_copy, cover_copy = pcall(function() return cover:copy() end)
-                if ok_copy and cover_copy then
-                    meta.cover = cover_copy
+        if loaded then
+            local ok_props, props = pcall(function() return doc:getProps() end)
+            if ok_props and props then
+                if props.title and props.title ~= "" then
+                    meta.title = props.title
                 end
-            else
-                logger.warn("Ananya: skipping malformed cover (bad dimensions) ->", tostring(path))
+                if props.authors and props.authors ~= "" then
+                    meta.authors = props.authors
+                end
+            end
+
+            local ok_cover, cover = pcall(function() return doc:getCoverPageImage() end)
+            if ok_cover and cover then
+                -- Validate dimensions before accepting this cover at all. A
+                -- corrupt or unusual source file (more likely for comic
+                -- archives than for epub/pdf) can hand back a cover with a
+                -- zero width or height. ImageWidget's "scale to fit" math
+                -- does self.width / bb_w — dividing by a zero bb_w produces
+                -- `inf` (Lua doesn't error on float division by zero), which
+                -- then flows into a native buffer-scaling call as a
+                -- nonsensical target size. That's a segfault, not a
+                -- catchable Lua error, and it only actually happens once the
+                -- row gets painted — which is exactly why this only showed
+                -- up under some filters (whichever ones actually render
+                -- that book's row) and not others.
+                local ok_dim, cover_w, cover_h = pcall(function()
+                    return cover:getWidth(), cover:getHeight()
+                end)
+                if ok_dim and cover_w and cover_h and cover_w > 0 and cover_h > 0 then
+                    -- Copy rather than keep the buffer doc:getCoverPageImage()
+                    -- hands back: some backends return a buffer backed
+                    -- directly by the document's own internal (e.g. mupdf)
+                    -- memory, which is only guaranteed valid while the
+                    -- document stays open. Since we cache this cover
+                    -- indefinitely (LibraryScan._meta_cache, for the whole
+                    -- process lifetime) but the document below is closed
+                    -- immediately, an uncopied reference would eventually
+                    -- point at freed memory — see the doc:close() note just
+                    -- below for why "eventually" here specifically means
+                    -- "the next time you open a document from a different
+                    -- folder", which is exactly what caused a segfault
+                    -- switching Books -> Manga -> Books.
+                    local ok_copy, cover_copy = pcall(function() return cover:copy() end)
+                    if ok_copy and cover_copy then
+                        meta.cover = cover_copy
+                    end
+                else
+                    logger.warn("Ananya: skipping malformed cover (bad dimensions) ->", tostring(path))
+                end
             end
         end
 
@@ -256,11 +319,8 @@ function LibraryScan.getBookMeta(path, filename)
         -- actually freeing the document's native (mupdf/crengine/etc)
         -- resources only happens inside doc:close(), which calls
         -- DocumentRegistry:closeDocument() itself once it's done. Calling
-        -- the registry method directly (as this used to, and as
-        -- newpage.lua's getCover() still does) leaves the document
-        -- "open" as far as its own native backend is concerned — its
-        -- resources only get freed later, whenever Lua's GC happens to
-        -- collect the now-unreferenced Document object. And
+        -- the registry method directly leaves the document's native
+        -- backend "open" until Lua's GC happens to collect it, and
         -- DocumentRegistry:openDocument() *forces* a GC sweep at the
         -- start of every call — so the very next book you open (e.g.
         -- switching the major filter back to Books) can trigger that
@@ -277,25 +337,29 @@ function LibraryScan.getBookMeta(path, filename)
     return meta
 end
 
--- Returns "complete", some other in-progress status string (e.g.
--- "reading"), or nil (never opened) for a book — used by the Library
--- page's Completed/Ongoing filter. Anything that isn't exactly
--- "complete" is treated as "Ongoing" by that filter, never-opened books
--- included.
+-- Returns status, percent for a book:
+--   status  - "complete", some other in-progress status string (e.g.
+--             "reading"), or nil (never opened). Used by the Library
+--             page's Completed/Ongoing filter — anything that isn't
+--             exactly "complete" is treated as "Ongoing", never-opened
+--             books included.
+--   percent - 0.0-1.0 read fraction (0 for a never-opened book), from
+--             KOReader's own per-book reading-progress tracking. Used
+--             for the "X% read" shown on each row.
 function LibraryScan.getReadStatus(path)
     local ok_bl, BookList = pcall(require, "ui/widget/booklist")
     if not ok_bl then
-        return nil
+        return nil, 0
     end
     local ok_opened, opened = pcall(BookList.hasBookBeenOpened, path)
     if not ok_opened or not opened then
-        return nil
+        return nil, 0
     end
     local ok_info, info = pcall(BookList.getBookInfo, path)
     if not ok_info or not info then
-        return nil
+        return nil, 0
     end
-    return info.status
+    return info.status, info.percent_finished or 0
 end
 
 return LibraryScan

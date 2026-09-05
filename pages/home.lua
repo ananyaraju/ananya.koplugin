@@ -179,6 +179,32 @@ local function buildLogoWidget(target_w)
     return nil
 end
 
+-- Loads a small square icon PNG from the plugin's icons/ folder at a
+-- given size (e.g. to sit inline in front of a section heading, matched
+-- to that heading's own text height). Same safe pattern as
+-- buildLogoWidget: `file =` with explicit width/height and no
+-- scale_factor (avoids the ImageCache-overflow crash covered in
+-- buildLogoWidget's own comment), and `alpha = true` since these icons
+-- are transparent-background PNGs.
+local function buildIconWidget(icon_filename, size)
+    local ok, widget_or_err = pcall(function()
+        local plugin_root = getPluginRoot()
+        if not plugin_root then return nil end
+        local icon_path = plugin_root .. "/icons/" .. icon_filename
+        return ImageWidget:new{
+            file = icon_path,
+            width = size,
+            height = size,
+            alpha = true,
+        }
+    end)
+    if ok and widget_or_err then
+        return widget_or_err
+    end
+    logger.warn("Ananya: failed to render icon " .. tostring(icon_filename) .. " ->", tostring(widget_or_err))
+    return nil
+end
+
 local AnanyaHome = InputContainer:extend{
     name = "ananya_home",
 }
@@ -342,7 +368,17 @@ local function getCoverAndProps(path)
         local cover = nil
         local ok_cover, cover_or_err = pcall(function() return doc:getCoverPageImage() end)
         if ok_cover then cover = cover_or_err end
-        DocumentRegistry:closeDocument(path)
+        -- IMPORTANT: doc:close(), NOT DocumentRegistry:closeDocument(path).
+        -- The latter only decrements DocumentRegistry's internal refcount;
+        -- actual native cleanup only happens inside doc:close(). Calling
+        -- the registry method directly leaves the document's native
+        -- backend open until Lua's GC happens to collect it — and
+        -- DocumentRegistry:openDocument() forces a GC sweep at the start
+        -- of every call, so opening a later, unrelated document can
+        -- trigger that delayed cleanup and free memory this function's
+        -- own cover was still pointing at. Same bug, same fix, as
+        -- data/library_scan.lua's getBookMeta().
+        doc:close()
         -- Epub/etc descriptions are frequently raw HTML (tags + entities
         -- like &#8212;) — util.htmlToPlainTextIfHtml is KOReader's own
         -- built-in for exactly this (it's what SimpleUI uses too, for the
@@ -525,7 +561,27 @@ end
 
 function AnanyaHome:buildCurrentlyReadingSection(content_w)
     local face_h2 = Font:getFace("tfont", 20)
-    local heading = TextWidget:new{ text = _("Currently Reading"), face = face_h2 }
+    local heading_text = TextWidget:new{ text = _("Currently Reading"), face = face_h2 }
+
+    -- Icon sized to match the heading text's own height, so it sits
+    -- inline at the same visual scale as the words next to it rather
+    -- than a fixed pixel size that'd look right on one screen and wrong
+    -- on another.
+    local heading_icon_size = heading_text:getSize().h
+    local heading_icon = buildIconWidget("currently-reading.png", heading_icon_size)
+
+    local heading
+    if heading_icon then
+        heading = HorizontalGroup:new{
+            heading_icon,
+            HorizontalSpan:new{ width = Screen:scaleBySize(6) },
+            heading_text,
+        }
+    else
+        -- Fail safe: missing/corrupt icon degrades to text-only heading
+        -- rather than breaking the section.
+        heading = heading_text
+    end
 
     local ok, entry = pcall(LibraryScan.getLastOpenedInProgress)
     if not ok then
@@ -583,9 +639,9 @@ function AnanyaHome:buildUI()
     -- was explicitly asked for: no scroll, content stays on-page.
     local body = VerticalGroup:new{
         align = "left",
-        VerticalSpan:new{ width = Screen:scaleBySize(44) }, -- whitespace above logo
+        VerticalSpan:new{ width = Screen:scaleBySize(50) }, -- whitespace above logo
         self:buildTitleImage(content_w),
-        VerticalSpan:new{ width = Screen:scaleBySize(44) }, -- whitespace below logo
+        VerticalSpan:new{ width = Screen:scaleBySize(50) }, -- whitespace below logo
         self:buildCurrentlyReadingSection(content_w),
     }
 
