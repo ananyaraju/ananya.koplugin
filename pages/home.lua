@@ -63,11 +63,121 @@ local BottomNav = safeRequire("widgets/bottomnav", {
 local LibraryScan = safeRequire("data/library_scan", {
     getAllFiles = function() return {} end,
     getCurrentlyReading = function() return {} end,
-    getRecentBooks = function() return {} end,
     getLastOpenedInProgress = function() return nil end,
 })
 
 local Screen = Device.screen
+
+-- --------------------------------------------------------------------------
+-- SVG logo (top of the home page)
+-- --------------------------------------------------------------------------
+
+-- Finds this plugin's own installation directory on disk, needed to locate
+-- bundled non-Lua assets (like the logo SVG) by absolute path. This is the
+-- same debug.getinfo-based pattern SimpleUI itself uses for exactly this.
+local function getPluginRoot()
+    local src_info = debug.getinfo(1, "S").source or ""
+    if src_info:sub(1, 1) ~= "@" then
+        return nil
+    end
+    local this_dir = src_info:sub(2):match("^(.*)/[^/]+$") -- .../ananya.koplugin/pages
+    if not this_dir then
+        return nil
+    end
+    local plugin_root = this_dir:match("^(.*)/[^/]+$") -- strip "/pages"
+    if not plugin_root then
+        return nil
+    end
+    if plugin_root:sub(1, 1) ~= "/" then
+        local ok_lfs, lfs = pcall(require, "libs/libkoreader-lfs")
+        local cwd = ok_lfs and lfs and lfs.currentdir()
+        if cwd then
+            plugin_root = cwd .. "/" .. plugin_root
+        end
+    end
+    return plugin_root
+end
+
+-- Reads width/height straight out of a PNG file's IHDR chunk (the first
+-- chunk, at a fixed offset, in every valid PNG) rather than hardcoding the
+-- logo's dimensions in Lua. That hardcoding is exactly what bit us before:
+-- the aspect ratio here used to be pinned to the old SVG's 3574x1359, so
+-- swapping in art with a different shape (like the current version with
+-- decorative icons scattered wider around the text) would silently
+-- stretch/squash it instead of adapting. Returns nil, nil if the file is
+-- missing or not a valid PNG, so callers can fall back gracefully.
+local function getPngDimensions(path)
+    local f = io.open(path, "rb")
+    if not f then return nil, nil end
+    local header = f:read(24)
+    f:close()
+    if not header or #header < 24 then return nil, nil end
+    if header:sub(1, 8) ~= "\137PNG\r\n\26\n" then return nil, nil end
+    local function be32(s, i)
+        local b1, b2, b3, b4 = s:byte(i, i + 3)
+        return b1 * 16777216 + b2 * 65536 + b3 * 256 + b4
+    end
+    local w, h = be32(header, 17), be32(header, 21)
+    if w and h and w > 0 and h > 0 then
+        return w, h
+    end
+    return nil, nil
+end
+
+-- Renders the bundled logo PNG to a given width, keeping its native aspect
+-- ratio (read from the file itself via getPngDimensions — see above).
+--
+-- NOTE: this used to be an SVG rendered via KOReader's MuPDF-based SVG
+-- renderer. That SVG wasn't real vector artwork though — it was a
+-- design-tool export where every shape was a rect filled via a
+-- <pattern>/<image> combo wrapping an embedded raster PNG. MuPDF's SVG
+-- renderer could handle that (unlike the lightweight default NanoSVG
+-- parser, which only understands plain path/fill shapes), but since the
+-- source was raster all along, there was no actual benefit to keeping it
+-- as SVG — so it's now shipped as a plain PNG and loaded directly via
+-- ImageWidget's own `file` loader.
+--
+-- IMPORTANT: deliberately NOT passing scale_factor here (not even 0 for
+-- "best fit"). ImageWidget:_loadfile() only forwards width/height into
+-- the initial file decode when scale_factor is nil — with scale_factor
+-- set (0 included), it decodes the file at its full native resolution
+-- FIRST and only resizes afterward. For a large source PNG that means
+-- decoding a huge RGBA buffer and trying to cache it, which can blow past
+-- ImageWidget's 8MB image cache and hard-crashes (LRU "not enough
+-- storage for cache") deep in the paint cycle, outside any pcall. Passing
+-- width/height directly (no scale_factor) lets the decoder resize during
+-- load instead, so only a small, target-sized buffer ever gets cached.
+--
+-- Also note `alpha = true`: this PNG has a transparent background, and
+-- ImageWidget defaults to ignoring any alpha channel entirely — without
+-- this flag it paints the raw (black) RGB underneath instead of blending,
+-- which is why it showed up as a solid black box before this was added.
+local function buildLogoWidget(target_w)
+    local ok, widget_or_err = pcall(function()
+        local plugin_root = getPluginRoot()
+        if not plugin_root then return nil end
+        local png_path = plugin_root .. "/icons/ananyas-kindle.png"
+        local native_w, native_h = getPngDimensions(png_path)
+        if not native_w then
+            -- Fall back to the old SVG's ratio if we can't read the file's
+            -- own header for some reason (still lets us degrade instead
+            -- of erroring out entirely).
+            native_w, native_h = 3574, 1359
+        end
+        local target_h = math.floor(target_w * native_h / native_w)
+        return ImageWidget:new{
+            file = png_path,
+            width = target_w,
+            height = target_h,
+            alpha = true,
+        }
+    end)
+    if ok and widget_or_err then
+        return widget_or_err
+    end
+    logger.warn("Ananya: failed to render logo PNG ->", tostring(widget_or_err))
+    return nil
+end
 
 local AnanyaHome = InputContainer:extend{
     name = "ananya_home",
@@ -123,6 +233,10 @@ function AnanyaHome:switchTo(target_id)
         UIManager:close(self)
         local AnanyaLibrary = require("pages/library")
         UIManager:show(AnanyaLibrary:new{})
+    elseif target_id == "newpage" then
+        UIManager:close(self)
+        local AnanyaNewPage = require("pages/newpage")
+        UIManager:show(AnanyaNewPage:new{})
     end
 end
 
@@ -379,6 +493,36 @@ function AnanyaHome:buildBookCard(entry, card_w, opts)
     }
 end
 
+-- ---------------------------------------------------------------------------
+-- Title image — sits above "Currently Reading", centered on screen.
+-- ---------------------------------------------------------------------------
+
+-- ---------------------------------------------------------------------------
+-- Title image — sits above "Currently Reading", centered on screen.
+-- ---------------------------------------------------------------------------
+
+function AnanyaHome:buildTitleImage(content_w)
+    -- Bumped from 0.75 -> 0.92: at 0.75 the logo read as noticeably small
+    -- on-device relative to the rest of the page.
+    local img_w = math.floor(content_w * 0.92)
+    local logo_widget = buildLogoWidget(img_w)
+    if not logo_widget then
+        -- Fail safe: an empty (zero-height) spacer, so a missing/corrupt
+        -- PNG or a decode failure degrades to "no image shown" rather
+        -- than breaking the whole home page.
+        return VerticalGroup:new{}
+    end
+    -- logo_widget already carries its own correctly-ratioed width/height
+    -- (computed in buildLogoWidget from the PNG's own header, not a
+    -- hardcoded ratio), so just read those back rather than recomputing
+    -- (and potentially re-guessing wrong) here.
+    local img_h = logo_widget.height or math.floor(img_w * 1359 / 3574)
+    return CenterContainer:new{
+        dimen = Geom:new{ w = content_w, h = img_h },
+        logo_widget,
+    }
+end
+
 function AnanyaHome:buildCurrentlyReadingSection(content_w)
     local face_h2 = Font:getFace("tfont", 20)
     local heading = TextWidget:new{ text = _("Currently Reading"), face = face_h2 }
@@ -413,113 +557,6 @@ function AnanyaHome:buildCurrentlyReadingSection(content_w)
 end
 
 -- ---------------------------------------------------------------------------
--- "Recent Books" section — 5 most recently opened books (via KOReader's
--- own ReadHistory), shown as a horizontal shelf: cover + percent caption
--- only, no title/author, matching the reference design.
--- ---------------------------------------------------------------------------
-
-local RECENT_SLOT_COUNT = 5
-
-function AnanyaHome:buildRecentCoverItem(entry, item_w, item_h)
-    local meta = getCoverAndProps(entry.path) or {}
-
-    local cover_widget
-    if meta.cover then
-        cover_widget = ImageWidget:new{
-            image = meta.cover,
-            width = item_w,
-            height = item_h,
-            scale_factor = 0,
-        }
-    else
-        cover_widget = FrameContainer:new{
-            width = item_w,
-            height = item_h,
-            bordersize = Size.border.window,
-            color = Blitbuffer.COLOR_LIGHT_GRAY,
-            background = Blitbuffer.COLOR_WHITE,
-            margin = 0,
-            padding = 0,
-            CenterContainer:new{
-                dimen = Geom:new{ w = item_w, h = item_h },
-                TextWidget:new{ text = "", face = Font:getFace("cfont", 9) },
-            },
-        }
-    end
-
-    local percent_label = TextWidget:new{
-        text = string.format("%d%% Read", math.floor((entry.percent or 0) * 100)),
-        face = Font:getFace("cfont", 11),
-        fgcolor = Blitbuffer.COLOR_DARK_GRAY,
-    }
-
-    local col = VerticalGroup:new{
-        align = "center",
-        cover_widget,
-        VerticalSpan:new{ width = Screen:scaleBySize(6) },
-        CenterContainer:new{
-            dimen = Geom:new{ w = item_w, h = percent_label:getSize().h },
-            percent_label,
-        },
-    }
-
-    return ReadingRow:new{
-        callback = function()
-            safeOpenBook(entry.path)
-        end,
-        col,
-    }
-end
-
-function AnanyaHome:buildRecentBooksSection(content_w)
-    local face_h2 = Font:getFace("tfont", 18)
-    local heading = TextWidget:new{ text = _("Recent Books"), face = face_h2 }
-
-    local ok, recent = pcall(LibraryScan.getRecentBooks, RECENT_SLOT_COUNT)
-    if not ok then
-        logger.warn("Ananya: getRecentBooks failed ->", tostring(recent))
-        recent = {}
-    end
-
-    local body
-    if #recent == 0 then
-        body = TextWidget:new{
-            text = _("No recently opened books yet."),
-            face = Font:getFace("cfont", 15),
-            fgcolor = Blitbuffer.COLOR_DARK_GRAY,
-        }
-    else
-        -- Fixed division by RECENT_SLOT_COUNT (5), regardless of how many
-        -- books are actually present. This is what the reference image
-        -- shows: 5 comfortably-sized covers filling the row. (An earlier
-        -- version divided by the ACTUAL count instead, which made covers
-        -- balloon when only 2-3 books existed; a later version went too
-        -- far the other way with a tiny fixed size. This is the middle
-        -- ground: consistent, screenshot-matching size, with unused space
-        -- on the right if you have fewer than 5 recent books.)
-        local gap = Screen:scaleBySize(10)
-        local item_w = math.floor((content_w - gap * (RECENT_SLOT_COUNT - 1)) / RECENT_SLOT_COUNT)
-        local item_h = math.floor(item_w * 1.5) -- typical book cover aspect ratio
-
-        local row = HorizontalGroup:new{}
-        for i, entry in ipairs(recent) do
-            table.insert(row, self:buildRecentCoverItem(entry, item_w, item_h))
-            if i < #recent then
-                table.insert(row, HorizontalSpan:new{ width = gap })
-            end
-        end
-        body = row
-    end
-
-    return VerticalGroup:new{
-        align = "left",
-        heading,
-        VerticalSpan:new{ width = Screen:scaleBySize(8) },
-        body,
-    }
-end
-
--- ---------------------------------------------------------------------------
 -- Layout
 -- ---------------------------------------------------------------------------
 
@@ -541,14 +578,15 @@ function AnanyaHome:buildUI()
     -- root of a whole recurring bug class here: a phantom bar at the
     -- bottom, content getting visually shifted/cropped, and even text
     -- losing its first characters (the viewport was panned). This page's
-    -- content is bounded — one hero card and a small row of covers — so
-    -- it's sized to simply fit without scrolling at all, which is also
-    -- what was explicitly asked for: no scroll, content stays on-page.
+    -- content is bounded — a title image and one hero card — so it's
+    -- sized to simply fit without scrolling at all, which is also what
+    -- was explicitly asked for: no scroll, content stays on-page.
     local body = VerticalGroup:new{
         align = "left",
+        VerticalSpan:new{ width = Screen:scaleBySize(44) }, -- whitespace above logo
+        self:buildTitleImage(content_w),
+        VerticalSpan:new{ width = Screen:scaleBySize(44) }, -- whitespace below logo
         self:buildCurrentlyReadingSection(content_w),
-        VerticalSpan:new{ width = Screen:scaleBySize(20) },
-        self:buildRecentBooksSection(content_w),
     }
 
     -- IMPORTANT: FrameContainer:getSize() (used just below) always
