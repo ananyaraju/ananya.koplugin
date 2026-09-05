@@ -46,10 +46,11 @@ local ICON_SZ = Screen:scaleBySize(26)
 local INDIC_H = Screen:scaleBySize(3)
 local LABEL_FS = 12
 
--- The three tabs this build supports.
+-- The three tabs this build supports, in display order: Library, Home,
+-- New Page (Home in the middle, per request).
 local TABS = {
-    { id = "home",    icon = "home",         label = "Home" },
     { id = "library", icon = "book.opened",  label = "Library" },
+    { id = "home",    icon = "home",         label = "Home" },
     { id = "newpage", icon = "appbar.menu",  label = "New Page" },
 }
 
