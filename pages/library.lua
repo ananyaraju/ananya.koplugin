@@ -44,6 +44,7 @@ local TextWidget = require("ui/widget/textwidget")
 local UIManager = require("ui/uimanager")
 local VerticalGroup = require("ui/widget/verticalgroup")
 local VerticalSpan = require("ui/widget/verticalspan")
+local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local logger = require("logger")
 local util = require("util")
 local _ = require("gettext")
@@ -350,8 +351,9 @@ function AnanyaLibrary:buildUI()
         end
     end
 
-    local content_h = screen_h - Header.HEIGHT - BottomNav.HEIGHT - toolbar_h
-        - Screen:scaleBySize(16) -- top padding
+    -- Total available height for the content area (everything between
+    -- header and bottom nav).
+    local content_h = screen_h - Header.HEIGHT - BottomNav.HEIGHT
 
     -- NOTE: no longer using ScrollableContainer here — see home.lua's
     -- buildUI for the full history of bugs it caused there (false
@@ -364,20 +366,39 @@ function AnanyaLibrary:buildUI()
     -- regardless of where it'd fall in that list.
     local list_area = rows
 
+    local body = VerticalGroup:new{
+        align = "left",
+        toolbar,
+        VerticalSpan:new{ width = Screen:scaleBySize(8) },
+        list_area,
+    }
+
+    -- Same forced-height fix as home.lua/newpage.lua's buildUI: a
+    -- FrameContainer's getSize() ignores its own explicit height and
+    -- derives it from its child's actual content instead. Without this,
+    -- content_area shrinks to fit however many rows the list actually
+    -- has, so on a short list (or after a search filter narrows it down)
+    -- bottom_nav ends up riding up right after the content instead of
+    -- being pinned to the bottom of the screen, leaving a gap below it.
+    -- Wrapping the body in a WidgetContainer with an explicit dimen
+    -- forces it — and therefore content_area — to always claim the full
+    -- available height, regardless of how many rows are visible.
+    local body_top_pad = Screen:scaleBySize(16)
+    local forced_body = WidgetContainer:new{
+        dimen = Geom:new{ w = content_w, h = content_h - body_top_pad },
+        body,
+    }
+
     local content_area = FrameContainer:new{
         width = screen_w,
-        height = content_h + toolbar_h + Screen:scaleBySize(16),
+        height = content_h,
         bordersize = 0, margin = 0,
         padding_left = side_margin,
         padding_right = side_margin,
-        padding_top = Screen:scaleBySize(16),
+        padding_top = body_top_pad,
+        padding_bottom = 0,
         background = Blitbuffer.COLOR_WHITE,
-        VerticalGroup:new{
-            align = "left",
-            toolbar,
-            VerticalSpan:new{ width = Screen:scaleBySize(8) },
-            list_area,
-        },
+        forced_body,
     }
 
     local page = VerticalGroup:new{

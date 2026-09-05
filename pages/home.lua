@@ -98,28 +98,84 @@ local function getPluginRoot()
     return plugin_root
 end
 
--- Renders the bundled logo SVG to a given width, keeping its native aspect
--- ratio (3574:1359, from the SVG's own viewBox). Uses KOReader's MuPDF-based
--- SVG renderer specifically, NOT the default NanoSVG one — NanoSVG is a
--- lightweight parser built for simple icon shapes (paths/fills only, same
--- as SimpleUI's own icon SVGs) and doesn't suFpport this SVG's pattern-fill
--- + embedded-raster-image technique (common in exports from design tools).
--- MuPDF is a full document rendering engine and handles it correctly.
+-- Reads width/height straight out of a PNG file's IHDR chunk (the first
+-- chunk, at a fixed offset, in every valid PNG) rather than hardcoding the
+-- logo's dimensions in Lua. That hardcoding is exactly what bit us before:
+-- the aspect ratio here used to be pinned to the old SVG's 3574x1359, so
+-- swapping in art with a different shape (like the current version with
+-- decorative icons scattered wider around the text) would silently
+-- stretch/squash it instead of adapting. Returns nil, nil if the file is
+-- missing or not a valid PNG, so callers can fall back gracefully.
+local function getPngDimensions(path)
+    local f = io.open(path, "rb")
+    if not f then return nil, nil end
+    local header = f:read(24)
+    f:close()
+    if not header or #header < 24 then return nil, nil end
+    if header:sub(1, 8) ~= "\137PNG\r\n\26\n" then return nil, nil end
+    local function be32(s, i)
+        local b1, b2, b3, b4 = s:byte(i, i + 3)
+        return b1 * 16777216 + b2 * 65536 + b3 * 256 + b4
+    end
+    local w, h = be32(header, 17), be32(header, 21)
+    if w and h and w > 0 and h > 0 then
+        return w, h
+    end
+    return nil, nil
+end
+
+-- Renders the bundled logo PNG to a given width, keeping its native aspect
+-- ratio (read from the file itself via getPngDimensions — see above).
+--
+-- NOTE: this used to be an SVG rendered via KOReader's MuPDF-based SVG
+-- renderer. That SVG wasn't real vector artwork though — it was a
+-- design-tool export where every shape was a rect filled via a
+-- <pattern>/<image> combo wrapping an embedded raster PNG. MuPDF's SVG
+-- renderer could handle that (unlike the lightweight default NanoSVG
+-- parser, which only understands plain path/fill shapes), but since the
+-- source was raster all along, there was no actual benefit to keeping it
+-- as SVG — so it's now shipped as a plain PNG and loaded directly via
+-- ImageWidget's own `file` loader.
+--
+-- IMPORTANT: deliberately NOT passing scale_factor here (not even 0 for
+-- "best fit"). ImageWidget:_loadfile() only forwards width/height into
+-- the initial file decode when scale_factor is nil — with scale_factor
+-- set (0 included), it decodes the file at its full native resolution
+-- FIRST and only resizes afterward. For a large source PNG that means
+-- decoding a huge RGBA buffer and trying to cache it, which can blow past
+-- ImageWidget's 8MB image cache and hard-crashes (LRU "not enough
+-- storage for cache") deep in the paint cycle, outside any pcall. Passing
+-- width/height directly (no scale_factor) lets the decoder resize during
+-- load instead, so only a small, target-sized buffer ever gets cached.
+--
+-- Also note `alpha = true`: this PNG has a transparent background, and
+-- ImageWidget defaults to ignoring any alpha channel entirely — without
+-- this flag it paints the raw (black) RGB underneath instead of blending,
+-- which is why it showed up as a solid black box before this was added.
 local function buildLogoWidget(target_w)
     local ok, widget_or_err = pcall(function()
         local plugin_root = getPluginRoot()
         if not plugin_root then return nil end
-        local svg_path = plugin_root .. "/icons/ananyas-kindle.svg"
-        local RenderImage = require("ui/renderimage")
-        local target_h = math.floor(target_w * 1359 / 3574)
-        local bb = RenderImage:renderSVGImageFileWithMupdf(svg_path, target_w, target_h)
-        if not bb then return nil end
-        return ImageWidget:new{ image = bb, width = target_w, height = target_h }
+        local png_path = plugin_root .. "/icons/ananyas-kindle.png"
+        local native_w, native_h = getPngDimensions(png_path)
+        if not native_w then
+            -- Fall back to the old SVG's ratio if we can't read the file's
+            -- own header for some reason (still lets us degrade instead
+            -- of erroring out entirely).
+            native_w, native_h = 3574, 1359
+        end
+        local target_h = math.floor(target_w * native_h / native_w)
+        return ImageWidget:new{
+            file = png_path,
+            width = target_w,
+            height = target_h,
+            alpha = true,
+        }
     end)
     if ok and widget_or_err then
         return widget_or_err
     end
-    logger.warn("Ananya: failed to render logo SVG ->", tostring(widget_or_err))
+    logger.warn("Ananya: failed to render logo PNG ->", tostring(widget_or_err))
     return nil
 end
 
@@ -446,15 +502,21 @@ end
 -- ---------------------------------------------------------------------------
 
 function AnanyaHome:buildTitleImage(content_w)
-    local img_w = math.floor(content_w * 0.75)
+    -- Bumped from 0.75 -> 0.92: at 0.75 the logo read as noticeably small
+    -- on-device relative to the rest of the page.
+    local img_w = math.floor(content_w * 0.92)
     local logo_widget = buildLogoWidget(img_w)
     if not logo_widget then
         -- Fail safe: an empty (zero-height) spacer, so a missing/corrupt
-        -- SVG or a MuPDF rendering failure degrades to "no image shown"
-        -- rather than breaking the whole home page.
+        -- PNG or a decode failure degrades to "no image shown" rather
+        -- than breaking the whole home page.
         return VerticalGroup:new{}
     end
-    local img_h = math.floor(img_w * 1359 / 3574)
+    -- logo_widget already carries its own correctly-ratioed width/height
+    -- (computed in buildLogoWidget from the PNG's own header, not a
+    -- hardcoded ratio), so just read those back rather than recomputing
+    -- (and potentially re-guessing wrong) here.
+    local img_h = logo_widget.height or math.floor(img_w * 1359 / 3574)
     return CenterContainer:new{
         dimen = Geom:new{ w = content_w, h = img_h },
         logo_widget,
@@ -521,8 +583,9 @@ function AnanyaHome:buildUI()
     -- was explicitly asked for: no scroll, content stays on-page.
     local body = VerticalGroup:new{
         align = "left",
+        VerticalSpan:new{ width = Screen:scaleBySize(32) }, -- whitespace above logo
         self:buildTitleImage(content_w),
-        VerticalSpan:new{ width = Screen:scaleBySize(16) },
+        VerticalSpan:new{ width = Screen:scaleBySize(32) }, -- whitespace below logo
         self:buildCurrentlyReadingSection(content_w),
     }
 
