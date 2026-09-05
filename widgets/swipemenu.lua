@@ -17,12 +17,25 @@
 -- currently running" with exactly this pattern:
 --     local ui = FileManager.instance or require("apps/reader/readerui").instance
 -- So rather than build our own menu, this just calls that same running
--- instance's own :onShowMenu() — the literal same tabbed
--- Filter/Settings/Tools/Search menu you'd get from FileManager or the
--- Reader directly, not a lookalike. If for some reason neither instance
--- is available (shouldn't normally happen, since Ananya is always opened
--- from one of them), this falls back to a minimal menu with just a
--- Close entry, so swiping down never does nothing.
+-- instance's own menu submodule's :onShowMenu() — the literal same
+-- tabbed Filter/Settings/Tools/Search menu you'd get from FileManager or
+-- the Reader directly, not a lookalike.
+--
+-- IF NO RUNNING UI IS FOUND, DO NOTHING — deliberately, not a fallback
+-- menu. An earlier version showed a minimal custom menu in that case, on
+-- the assumption "nothing found" meant something had gone wrong and the
+-- swipe shouldn't be a dead end. In practice that assumption was wrong,
+-- and actively harmful: our swipe zone stays registered on the Ananya
+-- page underneath even while the real menu is open on top of it, and
+-- tapping "Exit" inside that real menu starts tearing down
+-- FileManager/ReaderUI — during which our zone can pick up a stray
+-- gesture and fire again, right as FileManager.instance/ReaderUI.instance
+-- are being cleared. getRunningUI() legitimately finding nothing at that
+-- exact moment isn't a broken state to rescue with a fallback menu — the
+-- app is already exiting, and popping up ANY menu there just hijacks
+-- that: the old fallback's "Close" button only closed Ananya's own
+-- screen, not KOReader, which looked like "Exit doesn't work, and this
+-- weird menu appears instead". Doing nothing lets the real exit proceed.
 --
 -- Usage from any page's :init():
 --     local SwipeMenu = require("widgets/swipemenu")
@@ -31,10 +44,7 @@
 --     })
 
 local Device = require("device")
-local Screen = Device.screen
-local UIManager = require("ui/uimanager")
 local logger = require("logger")
-local _ = require("gettext")
 
 local SwipeMenu = {}
 
@@ -52,58 +62,46 @@ local function getRunningUI()
     return nil
 end
 
--- Minimal fallback menu — only used if getRunningUI() finds nothing,
--- which shouldn't normally happen.
-local function showFallbackMenu(opts)
-    local ok, err = pcall(function()
-        local Menu = require("ui/widget/menu")
-        local menu_instance
-        menu_instance = Menu:new{
-            title = opts.title or _("Ananya"),
-            item_table = {
-                { text = _("Close"), callback = opts.on_close },
-            },
-            width = math.floor(Screen:getWidth() * 0.8),
-            height = math.floor(Screen:getHeight() * 0.6),
-            is_popout = true,
-        }
-        menu_instance.close_callback = function()
-            UIManager:close(menu_instance)
-        end
-        UIManager:show(menu_instance)
-    end)
-    if not ok then
-        logger.warn("Ananya: fallback swipe-down menu failed ->", tostring(err))
-    end
-end
-
--- Shows the menu: KOReader's own real one if we can find the running
--- FileManager/ReaderUI instance, else the minimal fallback above.
-function SwipeMenu.show(opts)
-    opts = opts or {}
+-- Shows KOReader's own real menu, via whichever FileManager/ReaderUI
+-- instance is actually running. If none can be found, closes `page`
+-- instead — see below for why that's essential, not optional.
+function SwipeMenu.show(page)
     local ui = getRunningUI()
     -- IMPORTANT: onShowMenu lives on ui.menu (a FileManagerMenu/ReaderMenu
     -- *submodule*), not on the FileManager/ReaderUI instance itself.
     -- Confirmed directly in filemanager.lua: modules are attached via
     -- registerModule(name, ui_module), whose implementation is just
     -- `self[name] = ui_module` — so FileManagerMenu ends up at
-    -- ui.menu, never merged into ui's own prototype. Calling
-    -- ui:onShowMenu() therefore always failed (no such method on ui
-    -- itself) and silently fell back to the custom minimal menu every
-    -- time, which is exactly the bug this fixes.
+    -- ui.menu, never merged into ui's own prototype.
     if ui and ui.menu and ui.menu.onShowMenu then
         local ok, err = pcall(function() ui.menu:onShowMenu() end)
         if ok then return end
-        logger.warn("Ananya: ui.menu:onShowMenu() failed, falling back ->", tostring(err))
+        logger.warn("Ananya: ui.menu:onShowMenu() failed ->", tostring(err))
     end
-    showFallbackMenu(opts)
+
+    -- No running FileManager/ReaderUI found. An earlier version did
+    -- nothing here, on the theory that this state only happens
+    -- transiently while KOReader is exiting and shouldn't be
+    -- interrupted with a menu. That was half right and half a serious
+    -- bug: FileManager.instance/ReaderUI.instance genuinely being nil
+    -- can persist (if Exit gets partway through tearing FileManager down
+    -- and then stalls for any reason — including, plausibly, because
+    -- Ananya's own widget was still sitting on top of the stack keeping
+    -- UIManager:run() from ever seeing it as empty). "Do nothing" in
+    -- that state meant swipe permanently stopped doing anything, with no
+    -- ✕ button and (no hardware keys on this device) no other way out —
+    -- genuinely stuck. Closing `page` here instead means: if the real
+    -- screens are gone, get Ananya out of the way too, rather than
+    -- becoming the one remaining un-closable thing on screen.
+    if page and page.onClose then
+        pcall(function() page:onClose() end)
+    end
 end
 
 -- Wires up the swipe-down-to-menu gesture on `page`. `page` must be an
 -- InputContainer (registerTouchZones lives on that base class — every
--- Ananya page already is one). `opts` is passed straight through to
--- SwipeMenu.show() (only used if it has to fall back).
-function SwipeMenu.attach(page, opts)
+-- Ananya page already is one).
+function SwipeMenu.attach(page)
     if not Device:isTouchDevice() then
         return
     end
@@ -125,7 +123,7 @@ function SwipeMenu.attach(page, opts)
                 },
                 handler = function(ges)
                     if ges.direction == "south" then
-                        SwipeMenu.show(opts)
+                        SwipeMenu.show(page)
                         return true
                     end
                 end,
@@ -134,6 +132,18 @@ function SwipeMenu.attach(page, opts)
     end)
     if not ok then
         logger.warn("Ananya: failed to attach swipe-down menu ->", tostring(err))
+    end
+end
+
+-- Removes the gesture zone — call from a page's onClose()/onCloseWidget()
+-- as basic hygiene, so a closing page's zone can't still be live to catch
+-- a stray gesture during teardown (see the big comment above).
+function SwipeMenu.detach(page)
+    local ok, err = pcall(function()
+        page:unRegisterTouchZones({ { id = "ananya_swipe_menu" } })
+    end)
+    if not ok then
+        logger.warn("Ananya: failed to detach swipe-down menu ->", tostring(err))
     end
 end
 

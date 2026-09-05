@@ -225,14 +225,9 @@ function AnanyaHome:init()
         self.key_events.Close = { { Device.input.group.Back } }
     end
 
-    -- Swipe down anywhere in the usual top zone opens a menu, same as
-    -- native KOReader — see widgets/swipemenu.lua for how and why. The
-    -- header's own ✕ button stays as a failsafe alongside this, not
-    -- replaced by it, until the menu has more than just "Close" in it.
-    SwipeMenu.attach(self, {
-        title = _("Ananya"),
-        on_close = function() self:onClose() end,
-    })
+    -- Swipe down anywhere in the usual top zone opens KOReader's own
+    -- real menu — see widgets/swipemenu.lua for how and why.
+    SwipeMenu.attach(self)
 
     local ok, err = pcall(function() self:buildUI() end)
     if not ok then
@@ -247,6 +242,10 @@ function AnanyaHome:onShow()
 end
 
 function AnanyaHome:onClose()
+    -- Unregister the swipe-down zone before closing — see
+    -- widgets/swipemenu.lua's big comment for why a closing page's zone
+    -- staying live can interfere with KOReader's own Exit flow.
+    SwipeMenu.detach(self)
     UIManager:close(self)
     return true
 end
@@ -650,7 +649,7 @@ function AnanyaHome:buildUI()
     -- was explicitly asked for: no scroll, content stays on-page.
     local body = VerticalGroup:new{
         align = "left",
-        VerticalSpan:new{ width = Screen:scaleBySize(50) }, -- whitespace above logo
+        VerticalSpan:new{ width = Screen:scaleBySize(40) }, -- whitespace above logo
         self:buildTitleImage(content_w),
         VerticalSpan:new{ width = Screen:scaleBySize(50) }, -- whitespace below logo
         self:buildCurrentlyReadingSection(content_w),

@@ -18,6 +18,22 @@ local Ananya = WidgetContainer:extend{
 -- so it survives restarts without Ananya needing its own settings file.
 local START_WITH_SETTING = "ananya_start_with_home"
 
+-- A genuine _G global, NOT a module-level local — this matters a lot
+-- more than it looks. Confirmed directly in KOReader's own
+-- pluginloader.lua: plugins are loaded with `dofile(mainfile)`, not
+-- `require`. dofile has NO caching at all — it re-executes this entire
+-- file from scratch every single time PluginLoader:loadPlugins() runs,
+-- which happens once per FileManager/ReaderUI instantiation. A `local
+-- has_auto_started = false` at module scope, which is what this used to
+-- be, gets reset back to false on every single one of those reloads —
+-- so it never actually persisted across screens, and the "fire once per
+-- launch" logic silently never worked. _G, on the other hand, is the
+-- shared global table for the whole running Lua process — it survives
+-- dofile() re-running this file, and is only ever reset by an actual
+-- KOReader process restart, which is exactly the granularity wanted
+-- here.
+_G.__ananya_has_auto_started = _G.__ananya_has_auto_started or false
+
 function Ananya:init()
     self.ui.menu:registerToMainMenu(self)
 
@@ -30,24 +46,13 @@ function Ananya:init()
     -- auto-showing its own screen right after the real startup screen
     -- has finished initializing.
     --
-    -- FileManager-only check: Ananya:init() also runs when a book is
-    -- opened (ReaderUI has its own instance of every plugin), and
-    -- auto-popping Home open every time you open a book would be wrong —
-    -- this should only fire for "KOReader just started up into the file
-    -- manager". self.ui.name == "ReaderUI" is set directly in ReaderUI's
-    -- own class definition (present immediately, no init-order
-    -- dependency), and FileManager has no equivalent name field, so
-    -- "not ReaderUI" reliably means "FileManager" — these are the only
-    -- two contexts a plugin's init() ever runs in.
-    --
-    -- NOTE: an earlier version of this check used self.ui.file_chooser
-    -- (a FileManager-only field) instead, on the assumption it'd already
-    -- exist by the time a plugin's init() runs. Checked directly against
-    -- filemanager.lua's own FileManager:init(): it loads and initializes
-    -- every installed plugin (which is when THIS init() runs) *before*
-    -- calling self:setupLayout(), and file_chooser is only set inside
-    -- setupLayout(). So that check was always false, registerPostInitCallback
-    -- never even got called, and Home never auto-opened — this is why.
+    -- NOT restricted to FileManager: KOReader can just as easily start
+    -- by resuming the last-read book directly into the Reader (very
+    -- common with "resume last document" enabled) — self.ui.name would
+    -- be "ReaderUI" in that case, so a FileManager-only check would
+    -- silently skip auto-opening every single time on such a device.
+    -- The _G flag above is what keeps this safe regardless of which
+    -- screen genuinely loads first.
     --
     -- registerPostInitCallback, not an immediate call: at the point
     -- init() runs, FileManager/ReaderUI is still mid-setup (this is
@@ -56,10 +61,9 @@ function Ananya:init()
     -- gun. postInitCallback is KOReader's own mechanism for "run this
     -- once the screen has actually finished initializing", confirmed
     -- present on both FileManager and ReaderUI, and used internally by
-    -- KOReader itself for exactly this kind of deferred setup — and,
-    -- confirmed directly in FileManager:init(), it genuinely does run
-    -- after setupLayout(), so this fires at the right time.
-    if self.ui.name ~= "ReaderUI" and G_reader_settings:isTrue(START_WITH_SETTING) then
+    -- KOReader itself for exactly this kind of deferred setup.
+    if not _G.__ananya_has_auto_started and G_reader_settings:isTrue(START_WITH_SETTING) then
+        _G.__ananya_has_auto_started = true
         self.ui:registerPostInitCallback(function()
             self:openHome()
         end)

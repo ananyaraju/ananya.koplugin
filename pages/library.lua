@@ -118,13 +118,9 @@ function AnanyaLibrary:init()
         self.key_events.Close = { { Device.input.group.Back } }
     end
 
-    -- Swipe down anywhere in the usual top zone opens a menu, same as
-    -- native KOReader — see widgets/swipemenu.lua for how and why. The
-    -- header's own ✕ button stays as a failsafe alongside this.
-    SwipeMenu.attach(self, {
-        title = _("Ananya"),
-        on_close = function() self:onClose() end,
-    })
+    -- Swipe down anywhere in the usual top zone opens KOReader's own
+    -- real menu — see widgets/swipemenu.lua for how and why.
+    SwipeMenu.attach(self)
 
     self.major_filter = "books"   -- "books" | "manga"
     self.status_filter = "all"    -- "all" | "ongoing" | "completed"
@@ -143,6 +139,10 @@ function AnanyaLibrary:onShow()
 end
 
 function AnanyaLibrary:onClose()
+    -- Unregister the swipe-down zone before closing — see
+    -- widgets/swipemenu.lua's big comment for why a closing page's zone
+    -- staying live can interfere with KOReader's own Exit flow.
+    SwipeMenu.detach(self)
     UIManager:close(self)
     return true
 end
