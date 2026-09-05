@@ -154,8 +154,28 @@ local function getCover(path)
         if not doc then return nil end
         local cover = nil
         local ok_cover, cover_or_err = pcall(function() return doc:getCoverPageImage() end)
-        if ok_cover then cover = cover_or_err end
-        DocumentRegistry:closeDocument(path)
+        if ok_cover and cover_or_err then
+            -- Copy before closing: some backends hand back a buffer
+            -- backed directly by the document's own internal memory,
+            -- only valid while the document stays open. See the
+            -- doc:close() comment just below for why an uncopied
+            -- reference here can turn into a segfault later.
+            local ok_copy, cover_copy = pcall(function() return cover_or_err:copy() end)
+            if ok_copy then cover = cover_copy end
+        end
+        -- IMPORTANT: doc:close(), NOT DocumentRegistry:closeDocument(path).
+        -- The latter only decrements DocumentRegistry's refcount — actual
+        -- native cleanup only happens inside doc:close(). Calling the
+        -- registry method directly leaves the document's native backend
+        -- "open" until Lua's GC happens to collect it, and
+        -- DocumentRegistry:openDocument() *forces* a GC sweep at the
+        -- start of every call — so opening a later, unrelated document
+        -- can trigger that delayed cleanup and free memory an
+        -- already-cached cover from an earlier document was still
+        -- pointing at. (This is exactly what caused a segfault on the
+        -- Library page switching Books -> Manga -> Books; same pattern,
+        -- fixed there the same way.)
+        doc:close()
         return { cover = cover }
     end)
     if ok then return result end
