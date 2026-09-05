@@ -1,7 +1,7 @@
 -- pages/library.lua
 -- The Library page: persistent header + bottom nav, with a custom
--- scrollable list of every book under Ananya/ in between. Tapping a row
--- opens it directly in the reader.
+-- scrollable list of books/manga under Ananya/Books and Ananya/Manga.
+-- Tapping a row opens it directly in the reader.
 --
 -- ARCHITECTURE NOTE (why this doesn't use KOReader's stock Menu widget):
 -- An earlier version embedded ui/widget/menu.lua as a *child* inside this
@@ -9,24 +9,31 @@
 -- designed to be shown directly via UIManager:show() as its own top-level
 -- screen (that's how KOReader's file browser, OPDS catalog, etc. all use
 -- it) — nesting it inside another widget's layout is not how it's meant
--- to be used, and was the likely cause of the crash. Tellingly, SimpleUI
--- itself does NOT reuse the stock Menu widget for its library either — it
--- has its own hand-built list engine (engines/sui_book_grid.lua) for
--- exactly this reason. This version follows that lead: the book list here
--- is custom rows (same recipe as Home's "Currently Reading" rows). It
--- does NOT use ScrollableContainer for scrolling — that component caused
--- a whole recurring bug class on the home page (false-positive
--- scrollbar, viewport panning, clipped text) and was the prime suspect
--- for a crash reported on this page too, so it's been removed here as
--- well. Trade-off: a very long book list may not all fit on one screen
--- for now.
+-- to be used, and was the likely cause of a crash. This version follows
+-- SimpleUI's own lead (it hand-builds its book grid rather than reusing
+-- Menu) and uses custom rows instead, same recipe as Home's "Currently
+-- Reading" rows.
 --
--- SEARCH: a "Search" button opens a standalone InputDialog (shown the
--- normal, correct way — as its own top-level widget via UIManager:show(),
--- which is exactly what InputDialog is designed for). Typing a query and
--- confirming filters the list by filename substring match. This is
--- simpler than SimpleUI's faceted author/tag/series search, by design —
--- see the header comment note for why that's out of scope here.
+-- FILTERS:
+--   - Major filter: Books vs Manga — these are two entirely separate
+--     folders (Ananya/Books, Ananya/Manga), scanned independently by
+--     data/library_scan.lua, so switching this re-scans rather than just
+--     re-filtering an in-memory list.
+--   - Status filter: All / Ongoing / Completed, based on KOReader's own
+--     per-book read status (see LibraryScan.getReadStatus). "Ongoing"
+--     includes never-opened books, not just partially-read ones — there
+--     was no third "unread" bucket in the request, so it's lumped in with
+--     Ongoing rather than silently hidden.
+--   - Title search: a standalone InputDialog (shown the normal, correct
+--     way — as its own top-level widget via UIManager:show()). Filters by
+--     the book's actual TITLE (from metadata, via LibraryScan.getBookMeta)
+--     rather than filename.
+--
+-- Each row shows a cover-thumbnail icon, the title, and a page count —
+-- all sourced from LibraryScan.getBookMeta(), which opens the document
+-- once and caches the result, since opening every book on disk just to
+-- read its title is too expensive to redo on every keystroke/filter
+-- change (see the cache comment in library_scan.lua for details).
 
 local Blitbuffer = require("ffi/blitbuffer")
 local Button = require("ui/widget/button")
@@ -38,6 +45,7 @@ local Geom = require("ui/geometry")
 local GestureRange = require("ui/gesturerange")
 local HorizontalGroup = require("ui/widget/horizontalgroup")
 local HorizontalSpan = require("ui/widget/horizontalspan")
+local ImageWidget = require("ui/widget/imagewidget")
 local InputContainer = require("ui/widget/container/inputcontainer")
 local Size = require("ui/size")
 local TextWidget = require("ui/widget/textwidget")
@@ -48,6 +56,8 @@ local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local logger = require("logger")
 local util = require("util")
 local _ = require("gettext")
+
+local Screen = Device.screen
 
 -- Same helper as home.lua: wraps opening a book in pcall so any error
 -- (bad file, corrupt document, whatever) shows a message instead of
@@ -82,10 +92,11 @@ local BottomNav = safeRequire("widgets/bottomnav", {
     build = function() return VerticalGroup:new{} end,
 })
 local LibraryScan = safeRequire("data/library_scan", {
-    getAllFiles = function() return {} end,
+    getBooks = function() return {} end,
+    getManga = function() return {} end,
+    getBookMeta = function(path, filename) return { title = filename, authors = nil, pages = nil, cover = nil } end,
+    getReadStatus = function() return nil, 0 end,
 })
-
-local Screen = Device.screen
 
 local AnanyaLibrary = InputContainer:extend{
     name = "ananya_library",
@@ -106,7 +117,9 @@ function AnanyaLibrary:init()
         self.key_events.Close = { { Device.input.group.Back } }
     end
 
-    self.search_query = nil -- nil = no active filter
+    self.major_filter = "books"   -- "books" | "manga"
+    self.status_filter = "all"    -- "all" | "ongoing" | "completed"
+    self.search_query = nil       -- nil = no active title filter
 
     local ok, err = pcall(function() self:buildUI() end)
     if not ok then
@@ -169,52 +182,30 @@ function AnanyaLibrary:buildFailSafeUI()
 end
 
 -- ---------------------------------------------------------------------------
--- Book rows
+-- Filter state changes — all funnel through rebuild()
 -- ---------------------------------------------------------------------------
 
--- A tappable row: filename, opens the book directly. Same recipe as
--- pages/home.lua's ReadingRow.
-local BookRow = InputContainer:extend{}
-
-function BookRow:init()
-    -- See home.lua's ReadingRow for why this explicit re-wrap matters:
-    -- VerticalGroup/HorizontalGroup's getSize() returns a plain table,
-    -- not a real Geom, which crashes GestureRange:match(). framed here
-    -- is a FrameContainer (safe either way), but this makes the class
-    -- robust regardless of what gets passed as the child in the future.
-    local sz = self[1]:getSize()
-    self.dimen = Geom:new{ x = 0, y = 0, w = sz.w, h = sz.h }
-    self.ges_events = {
-        Tap = { GestureRange:new{ ges = "tap", range = self.dimen } },
-    }
+function AnanyaLibrary:setMajorFilter(id)
+    if self.major_filter == id then return end
+    self.major_filter = id
+    self:rebuild()
 end
 
-function BookRow:onTap()
-    if self.callback then self.callback() end
-    return true
+function AnanyaLibrary:setStatusFilter(id)
+    if self.status_filter == id then return end
+    self.status_filter = id
+    self:rebuild()
 end
 
-function AnanyaLibrary:buildBookRow(entry, row_w)
-    local title = TextWidget:new{
-        text = entry.name,
-        face = Font:getFace("cfont", 16),
-        max_width = row_w,
-    }
-    local framed = FrameContainer:new{
-        width = row_w,
-        bordersize = 0, margin = 0,
-        padding_top = Screen:scaleBySize(8),
-        padding_bottom = Screen:scaleBySize(8),
-        padding_left = Screen:scaleBySize(4),
-        padding_right = Screen:scaleBySize(4),
-        title,
-    }
-    return BookRow:new{
-        callback = function()
-            safeOpenBook(entry.path)
-        end,
-        framed,
-    }
+-- Rebuilds the whole page in place (simplest safe way to reflect a new
+-- filter/search state — no partial-update bookkeeping to get wrong).
+function AnanyaLibrary:rebuild()
+    local ok, err = pcall(function() self:buildUI() end)
+    if not ok then
+        logger.warn("Ananya: library rebuild failed ->", tostring(err))
+        self:buildFailSafeUI()
+    end
+    UIManager:setDirty(self, "full")
 end
 
 -- ---------------------------------------------------------------------------
@@ -225,9 +216,9 @@ function AnanyaLibrary:openSearchDialog()
     local InputDialog = require("ui/widget/inputdialog")
     local dialog
     dialog = InputDialog:new{
-        title = _("Search library"),
+        title = _("Search by title"),
         input = self.search_query or "",
-        input_hint = _("Filename contains…"),
+        input_hint = _("Title contains…"),
         buttons = {
             {
                 {
@@ -260,15 +251,180 @@ function AnanyaLibrary:openSearchDialog()
     dialog:onShowKeyboard()
 end
 
--- Rebuilds the whole page in place (simplest safe way to reflect a new
--- search filter — no partial-update bookkeeping to get wrong).
-function AnanyaLibrary:rebuild()
-    local ok, err = pcall(function() self:buildUI() end)
-    if not ok then
-        logger.warn("Ananya: library rebuild failed ->", tostring(err))
-        self:buildFailSafeUI()
+-- ---------------------------------------------------------------------------
+-- Toggle-style filter buttons (major filter row + status filter row)
+-- ---------------------------------------------------------------------------
+
+local function buildToggleButton(label, is_active, callback)
+    return Button:new{
+        text = label,
+        callback = callback,
+        text_font_size = 15,
+        text_font_bold = is_active,
+        bordersize = is_active and Size.border.button or 0,
+        margin = Screen:scaleBySize(2),
+        padding_h = Screen:scaleBySize(8),
+        radius = 0,
+    }
+end
+
+-- ---------------------------------------------------------------------------
+-- Book rows
+-- ---------------------------------------------------------------------------
+
+-- A tappable row: cover icon + title + page count, opens the book
+-- directly. Same recipe as pages/home.lua's ReadingRow.
+local BookRow = InputContainer:extend{}
+
+function BookRow:init()
+    -- See home.lua's ReadingRow for why this explicit re-wrap matters:
+    -- VerticalGroup/HorizontalGroup's getSize() returns a plain table,
+    -- not a real Geom, which crashes GestureRange:match(). framed here
+    -- is a FrameContainer (safe either way), but this makes the class
+    -- robust regardless of what gets passed as the child in the future.
+    local sz = self[1]:getSize()
+    self.dimen = Geom:new{ x = 0, y = 0, w = sz.w, h = sz.h }
+    self.ges_events = {
+        Tap = { GestureRange:new{ ges = "tap", range = self.dimen } },
+    }
+end
+
+function BookRow:onTap()
+    if self.callback then self.callback() end
+    return true
+end
+
+local ICON_W = Screen:scaleBySize(44) -- fixed, used to reserve text column width
+local ICON_MIN_H = Screen:scaleBySize(62) -- floor for rows with very little text (e.g. no author)
+
+-- Builds the small cover-thumbnail icon for a row, at an explicit
+-- width/height (sized by the caller to match that row's actual text
+-- column height — see buildBookRow). Uses `image =` (a pre-decoded
+-- BlitBuffer from doc:getCoverPageImage(), same recipe as newpage.lua's
+-- Recent Books shelf) rather than `file =`, which matters: ImageWidget's
+-- `file =` path runs decoded buffers through its shared 8MB-capped
+-- ImageCache before any resize happens if scale_factor is set, which is
+-- exactly what crashed the Home page logo earlier. `image =` skips that
+-- cache entirely, so scale_factor=0 (best-fit, since covers come in all
+-- sorts of aspect ratios unlike our fixed-ratio logo) is safe to use here.
+--
+-- IMPORTANT: image_disposable = false. This cover BlitBuffer comes from
+-- LibraryScan's own metadata cache (LibraryScan._meta_cache), which is
+-- deliberately shared and long-lived — reused across every rebuild()
+-- triggered by clicking a filter, not re-decoded each time. ImageWidget
+-- defaults image_disposable to true, meaning it assumes it OWNS the
+-- buffer and will free() it once the widget itself is discarded. Since
+-- every filter click discards the old row widgets and builds fresh ones
+-- pointing at that *same* shared buffer, leaving the default in place
+-- meant the first rebuild's widget would free memory the cache was still
+-- holding a reference to — the next filter click then handed that
+-- already-freed buffer to a new ImageWidget. That's what was crashing on
+-- repeated filter clicks. Setting this to false tells ImageWidget the
+-- buffer is owned elsewhere (by the cache) and must not be freed here.
+local function buildCoverIcon(cover, icon_w, icon_h)
+    if cover then
+        local ok_dim, cover_w, cover_h = pcall(function()
+            return cover:getWidth(), cover:getHeight()
+        end)
+        if not (ok_dim and cover_w and cover_h and cover_w > 0 and cover_h > 0) then
+            cover = nil -- fall through to the placeholder below
+        end
     end
-    UIManager:setDirty(self, "full")
+    if cover then
+        return ImageWidget:new{
+            image = cover,
+            width = icon_w,
+            height = icon_h,
+            scale_factor = 0,
+            image_disposable = false,
+        }
+    end
+    -- No cover available (extraction failed, or format has none): a
+    -- plain bordered placeholder box instead of leaving a gap.
+    return FrameContainer:new{
+        width = icon_w,
+        height = icon_h,
+        bordersize = Size.border.window,
+        color = Blitbuffer.COLOR_LIGHT_GRAY,
+        background = Blitbuffer.COLOR_WHITE,
+        margin = 0,
+        padding = 0,
+        CenterContainer:new{
+            dimen = Geom:new{ w = icon_w, h = icon_h },
+            TextWidget:new{ text = "", face = Font:getFace("cfont", 9) },
+        },
+    }
+end
+
+function AnanyaLibrary:buildBookRow(entry, row_w)
+    local text_w = row_w - ICON_W - Screen:scaleBySize(12)
+
+    local title_widget = TextWidget:new{
+        text = entry.title,
+        face = Font:getFace("cfont", 16),
+        max_width = text_w,
+    }
+
+    local author_widget = nil
+    if entry.authors then
+        author_widget = TextWidget:new{
+            text = entry.authors,
+            face = Font:getFace("cfont", 14),
+            fgcolor = Blitbuffer.COLOR_DARK_GRAY,
+            max_width = text_w,
+        }
+    end
+
+    -- Pages + read percent on one line, e.g. "234 pages · 42% Read". No
+    -- progress bar per the request — just the number, same as SimpleUI.
+    local pages_text = entry.pages and string.format(_("%d pages"), entry.pages) or _("Pages unknown")
+    local percent_text = string.format(_("%d%% Read"), math.floor((entry.percent or 0) * 100))
+    local meta_widget = TextWidget:new{
+        text = pages_text .. "  ·  " .. percent_text,
+        face = Font:getFace("cfont", 13),
+        fgcolor = Blitbuffer.COLOR_DARK_GRAY,
+    }
+
+    local text_col = VerticalGroup:new{ align = "left" }
+    table.insert(text_col, title_widget)
+    table.insert(text_col, VerticalSpan:new{ width = Screen:scaleBySize(2) })
+    if author_widget then
+        table.insert(text_col, author_widget)
+        table.insert(text_col, VerticalSpan:new{ width = Screen:scaleBySize(4) })
+    end
+    table.insert(text_col, meta_widget)
+
+    -- Size the cover to match the text column's actual height, so it
+    -- fills the same vertical space as the title/author/meta stack next
+    -- to it, instead of a fixed height that looks small next to a row
+    -- with an author line versus one without. ICON_MIN_H is a floor for
+    -- unusually short rows (e.g. no author, small fonts) so the cover
+    -- never gets squashed thinner than a sensible minimum.
+    local icon_h = math.max(text_col:getSize().h, ICON_MIN_H)
+    local cover_widget = buildCoverIcon(entry.cover, ICON_W, icon_h)
+
+    local row = HorizontalGroup:new{
+        cover_widget,
+        HorizontalSpan:new{ width = Screen:scaleBySize(12) },
+        text_col,
+    }
+
+    local framed = FrameContainer:new{
+        width = row_w,
+        bordersize = 0, margin = 0,
+        padding_top = Screen:scaleBySize(8),
+        padding_bottom = Screen:scaleBySize(8),
+        padding_left = Screen:scaleBySize(4),
+        padding_right = Screen:scaleBySize(4),
+        row,
+    }
+
+    return BookRow:new{
+        callback = function()
+            safeOpenBook(entry.path)
+        end,
+        framed,
+    }
 end
 
 -- ---------------------------------------------------------------------------
@@ -285,27 +441,80 @@ function AnanyaLibrary:buildUI()
         self:switchTo(target_id)
     end)
 
-    local ok, all_files = pcall(LibraryScan.getAllFiles)
-    if not ok then
-        logger.warn("Ananya: getAllFiles failed ->", tostring(all_files))
-        all_files = {}
+    -- ── Scan + gather metadata for the active major filter ─────────────
+    local ok_files, raw_files
+    if self.major_filter == "manga" then
+        ok_files, raw_files = pcall(LibraryScan.getManga)
+    else
+        ok_files, raw_files = pcall(LibraryScan.getBooks)
     end
-    self.all_files = all_files
+    if not ok_files then
+        logger.warn("Ananya: library scan failed ->", tostring(raw_files))
+        raw_files = {}
+    end
 
-    local visible_files = all_files
-    if self.search_query then
-        local needle = util.stringLower(self.search_query)
-        visible_files = {}
-        for _, entry in ipairs(all_files) do
-            if util.stringLower(entry.name):find(needle, 1, true) then
-                table.insert(visible_files, entry)
+    local all_entries = {}
+    for _, f in ipairs(raw_files) do
+        local ok_meta, meta = pcall(LibraryScan.getBookMeta, f.path, f.name)
+        if not ok_meta then
+            logger.warn("Ananya: getBookMeta failed ->", tostring(meta))
+            meta = { title = f.name, authors = nil, pages = nil, cover = nil }
+        end
+        local ok_status, status, percent = pcall(LibraryScan.getReadStatus, f.path)
+        if not ok_status then
+            status, percent = nil, 0
+        end
+        table.insert(all_entries, {
+            path = f.path,
+            title = meta.title,
+            authors = meta.authors,
+            pages = meta.pages,
+            cover = meta.cover,
+            status = status,
+            percent = percent or 0,
+        })
+    end
+
+    -- ── Apply status filter (All / Ongoing / Completed) ─────────────────
+    local status_filtered = all_entries
+    if self.status_filter ~= "all" then
+        status_filtered = {}
+        for _, entry in ipairs(all_entries) do
+            local is_complete = entry.status == "complete"
+            if (self.status_filter == "completed" and is_complete)
+                or (self.status_filter == "ongoing" and not is_complete) then
+                table.insert(status_filtered, entry)
             end
         end
     end
-    table.sort(visible_files, function(a, b) return a.name:lower() < b.name:lower() end)
 
-    -- ── Toolbar: search button + result count / active filter ──────────
-    local toolbar_h = Screen:scaleBySize(44)
+    -- ── Apply title search ──────────────────────────────────────────────
+    local visible_entries = status_filtered
+    if self.search_query then
+        local needle = util.stringLower(self.search_query)
+        visible_entries = {}
+        for _, entry in ipairs(status_filtered) do
+            if util.stringLower(entry.title):find(needle, 1, true) then
+                table.insert(visible_entries, entry)
+            end
+        end
+    end
+
+    table.sort(visible_entries, function(a, b)
+        return util.stringLower(a.title) < util.stringLower(b.title)
+    end)
+
+    -- ── Toolbar: major filter row, status filter + search row, count ───
+    local major_row = HorizontalGroup:new{
+        buildToggleButton(_("Books"), self.major_filter == "books", function()
+            self:setMajorFilter("books")
+        end),
+        HorizontalSpan:new{ width = Screen:scaleBySize(8) },
+        buildToggleButton(_("Manga"), self.major_filter == "manga", function()
+            self:setMajorFilter("manga")
+        end),
+    }
+
     local search_btn = Button:new{
         text = _("Search"),
         callback = function() self:openSearchDialog() end,
@@ -314,75 +523,90 @@ function AnanyaLibrary:buildUI()
         margin = Screen:scaleBySize(2),
         radius = 0,
     }
+
+    local status_row = HorizontalGroup:new{
+        buildToggleButton(_("All"), self.status_filter == "all", function()
+            self:setStatusFilter("all")
+        end),
+        HorizontalSpan:new{ width = Screen:scaleBySize(6) },
+        buildToggleButton(_("Ongoing"), self.status_filter == "ongoing", function()
+            self:setStatusFilter("ongoing")
+        end),
+        HorizontalSpan:new{ width = Screen:scaleBySize(6) },
+        buildToggleButton(_("Completed"), self.status_filter == "completed", function()
+            self:setStatusFilter("completed")
+        end),
+        HorizontalSpan:new{ width = Screen:scaleBySize(12) },
+        search_btn,
+    }
+
     local count_text
     if self.search_query then
         count_text = string.format(_("\"%s\" — %d of %d"),
-            self.search_query, #visible_files, #all_files)
+            self.search_query, #visible_entries, #status_filtered)
     else
-        count_text = string.format(_("%d books"), #all_files)
+        count_text = string.format(_("%d items"), #visible_entries)
     end
-    local toolbar = HorizontalGroup:new{
-        search_btn,
-        HorizontalSpan:new{ width = Screen:scaleBySize(12) },
-        CenterContainer:new{
-            dimen = Geom:new{
-                w = content_w - search_btn:getSize().w - Screen:scaleBySize(12),
-                h = toolbar_h,
-            },
-            TextWidget:new{
-                text = count_text,
-                face = Font:getFace("cfont", 14),
-                fgcolor = Blitbuffer.COLOR_DARK_GRAY,
-            },
-        },
+    local count_widget = TextWidget:new{
+        text = count_text,
+        face = Font:getFace("cfont", 13),
+        fgcolor = Blitbuffer.COLOR_DARK_GRAY,
+    }
+
+    local toolbar = VerticalGroup:new{
+        align = "left",
+        major_row,
+        VerticalSpan:new{ width = Screen:scaleBySize(8) },
+        status_row,
+        VerticalSpan:new{ width = Screen:scaleBySize(6) },
+        count_widget,
     }
 
     -- ── Book list ────────────────────────────────────────────────────
     local rows = VerticalGroup:new{ align = "left" }
-    if #visible_files == 0 then
+    if #visible_entries == 0 then
+        local empty_text
+        if self.search_query then
+            empty_text = _("No matches.")
+        elseif self.major_filter == "manga" then
+            empty_text = _("No manga found under Ananya/Manga.")
+        else
+            empty_text = _("No books found under Ananya/Books.")
+        end
         table.insert(rows, TextWidget:new{
-            text = self.search_query and _("No matches.") or _("No books found under Ananya/."),
+            text = empty_text,
             face = Font:getFace("cfont", 15),
             fgcolor = Blitbuffer.COLOR_DARK_GRAY,
         })
     else
-        for _, entry in ipairs(visible_files) do
+        for _, entry in ipairs(visible_entries) do
             table.insert(rows, self:buildBookRow(entry, content_w))
         end
     end
 
-    -- Total available height for the content area (everything between
-    -- header and bottom nav).
-    local content_h = screen_h - Header.HEIGHT - BottomNav.HEIGHT
-
-    -- NOTE: no longer using ScrollableContainer here — see home.lua's
-    -- buildUI for the full history of bugs it caused there (false
-    -- positive scrollbar, viewport panning, clipped text). It's the prime
-    -- suspect for this page's reported crash too, and unlike the home
-    -- page's genuinely-bounded content, this list COULD be long — but
-    -- stability comes first. Trade-off: if you have more books than fit
-    -- on one screen, only the first ones (alphabetically) will be
-    -- visible for now; search still works to find a specific book
-    -- regardless of where it'd fall in that list.
-    local list_area = rows
-
+    -- NOTE: no ScrollableContainer here — see home.lua's buildUI for the
+    -- full history of bugs it caused (false-positive scrollbar, viewport
+    -- panning, clipped text). This list COULD be long (unlike Home's
+    -- genuinely-bounded content), but stability comes first. Trade-off:
+    -- if you have more items than fit on one screen, only the first ones
+    -- (alphabetically, within the active filters) will be visible for
+    -- now — search/status filters still work to narrow down to a
+    -- specific item regardless of where it'd fall in the full list.
     local body = VerticalGroup:new{
         align = "left",
         toolbar,
-        VerticalSpan:new{ width = Screen:scaleBySize(8) },
-        list_area,
+        VerticalSpan:new{ width = Screen:scaleBySize(10) },
+        rows,
     }
+
+    local content_h = screen_h - Header.HEIGHT - BottomNav.HEIGHT
 
     -- Same forced-height fix as home.lua/newpage.lua's buildUI: a
     -- FrameContainer's getSize() ignores its own explicit height and
     -- derives it from its child's actual content instead. Without this,
-    -- content_area shrinks to fit however many rows the list actually
-    -- has, so on a short list (or after a search filter narrows it down)
-    -- bottom_nav ends up riding up right after the content instead of
-    -- being pinned to the bottom of the screen, leaving a gap below it.
-    -- Wrapping the body in a WidgetContainer with an explicit dimen
-    -- forces it — and therefore content_area — to always claim the full
-    -- available height, regardless of how many rows are visible.
+    -- content_area shrinks to fit however many rows are actually visible,
+    -- so on a short/filtered-down list bottom_nav rides up right after
+    -- the content instead of staying pinned to the bottom of the screen.
     local body_top_pad = Screen:scaleBySize(16)
     local forced_body = WidgetContainer:new{
         dimen = Geom:new{ w = content_w, h = content_h - body_top_pad },
