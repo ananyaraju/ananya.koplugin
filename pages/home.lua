@@ -573,6 +573,7 @@ function AnanyaHome:buildCurrentlyReadingSection(content_w)
     local heading
     if heading_icon then
         heading = HorizontalGroup:new{
+            HorizontalSpan:new{ width = Screen:scaleBySize(4) },
             heading_icon,
             HorizontalSpan:new{ width = Screen:scaleBySize(6) },
             heading_text,
