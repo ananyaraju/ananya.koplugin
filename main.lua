@@ -37,6 +37,21 @@ _G.__ananya_has_auto_started = _G.__ananya_has_auto_started or false
 function Ananya:init()
     self.ui.menu:registerToMainMenu(self)
 
+    -- Diagnostic line, deliberately unconditional (not just when the
+    -- toggle is on) — this alone should make the next crash.log
+    -- conclusive: it shows whether init() is even reached, which screen
+    -- type it thinks it's running in, whether the toggle read back as
+    -- on, and whether the one-shot flag is (correctly) blocking a
+    -- second auto-open. If this line is missing from crash.log entirely,
+    -- the plugin isn't loading at all — a different problem than
+    -- anything below.
+    logger.info(string.format(
+        "Ananya: init() ui.name=%s start_with_home=%s has_auto_started=%s",
+        tostring(self.ui.name),
+        tostring(G_reader_settings:isTrue(START_WITH_SETTING)),
+        tostring(_G.__ananya_has_auto_started)
+    ))
+
     -- Auto-open Home on startup, if enabled — this is how SimpleUI's own
     -- "Start with Desktop" works too: not a KOReader core setting (there
     -- isn't a generic "which screen replaces the file manager" hook —
@@ -64,9 +79,32 @@ function Ananya:init()
     -- KOReader itself for exactly this kind of deferred setup.
     if not _G.__ananya_has_auto_started and G_reader_settings:isTrue(START_WITH_SETTING) then
         _G.__ananya_has_auto_started = true
-        self.ui:registerPostInitCallback(function()
-            self:openHome()
+        -- Wrapped in pcall, unlike the earlier version of this block:
+        -- every other risky call in this whole codebase already is (see
+        -- any pages/*.lua file), and this one wasn't, which meant if
+        -- registerPostInitCallback ever failed for any reason, it did so
+        -- completely silently — no crash.log entry, nothing to diagnose,
+        -- just "still not working" with no trace. Now it'll actually
+        -- leave an "Ananya:" line in crash.log if this specific step is
+        -- what's failing.
+        local ok, err = pcall(function()
+            self.ui:registerPostInitCallback(function()
+                logger.info("Ananya: postInitCallback fired, auto-opening Home")
+                -- nextTick rather than an immediate call, so this still
+                -- runs on the normal event loop instead of synchronously
+                -- inside plugin init (the original reason for adding any
+                -- delay at all) — but nextTick queues it for "as soon as
+                -- the event loop is free" rather than scheduleIn's fixed
+                -- wait, which was adding a full second of pure artificial
+                -- delay on top of Home's own (already slow) first build.
+                UIManager:nextTick(function()
+                    self:openHome()
+                end)
+            end)
         end)
+        if not ok then
+            logger.warn("Ananya: failed to register auto-start callback ->", tostring(err))
+        end
     end
 end
 
